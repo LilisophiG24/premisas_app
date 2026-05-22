@@ -539,32 +539,47 @@ def parse_existing_indisp(ws):  # kept for backward compat
 
 @st.cache_data(show_spinner=False)
 def load_source_libranzas(file_bytes):
-    """Load libranzas_nuevas.xlsx or libranzas_viejas.xlsx."""
+    """Load libranzas source file using header names, not positional indices."""
     wb = load_workbook(BytesIO(file_bytes), data_only=True)
     ws = wb.active
     rows = []
+    headers = {}
     hdr_found = False
+
     for row in ws.iter_rows(min_row=1, values_only=True):
         if not hdr_found:
-            if row[0] == "Número": hdr_found = True
+            if row[0] == "Número":
+                hdr_found = True
+                headers = {str(c).strip(): i for i, c in enumerate(row) if c is not None}
             continue
         if not any(c is not None for c in row): continue
-        r = list(row) + [None]*20
+
+        def g(col, default=""):
+            idx = headers.get(col)
+            if idx is None: return default
+            val = row[idx] if idx < len(row) else None
+            return str(val) if val is not None else default
+
         rows.append({
-            "Número":       r[0],  "Tipo":          r[1],
-            "Es repetitiva":r[2],  "Agente":        r[3],
-            "Fecha Solicitud": str(r[4] or ""),
-            "Solicitante":  r[5],
-            "Fecha Inicio": str(r[6] or ""), "Fecha Final": str(r[7] or ""),
-            "Duración Programada": str(r[8] or ""),
-            "Fecha Inicio Real": str(r[9] or ""), "Fecha Final Real": str(r[10] or ""),
-            "Duración Real": str(r[11] or ""),
-            "Descripción":  str(r[12] or ""), "Observaciones": str(r[13] or ""),
-            "Equipos":      str(r[14] or ""),
-            "Responsable de Campo": str(r[15] or ""),
-            "Cargo Responsable Campo": str(r[16] or ""),
-            "Fecha Aprobación": str(r[17] or ""),
-            "Último Estado": str(r[18] or ""),
+            "Número":            row[0],
+            "Tipo":              g("Tipo"),
+            "Es repetitiva":     g("Es repetitiva"),
+            "Agente":            g("Agente"),
+            "Fecha Solicitud":   g("Fecha Solicitud"),
+            "Solicitante":       g("Solicitante"),
+            "Fecha Inicio":      g("Fecha Inicio"),
+            "Fecha Final":       g("Fecha Final"),
+            "Duración Programada": g("Duración Programada"),
+            "Fecha Inicio Real": g("Fecha Inicio Real"),
+            "Fecha Final Real":  g("Fecha Final Real"),
+            "Duración Real":     g("Duración Real"),
+            "Descripción":       g("Descripción"),
+            "Observaciones":     g("Observaciones"),
+            "Equipos":           g("Equipos"),
+            "Responsable de Campo": g("Responsable de Campo"),
+            "Cargo Responsable Campo": g("Cargo Responsable Campo"),
+            "Fecha Aprobación":  g("Fecha Aprobación"),
+            "Último Estado":     g("Último Estado"),
         })
     return pd.DataFrame(rows) if rows else pd.DataFrame()
 
@@ -1291,7 +1306,8 @@ def vista_premisas():
         if buscar:
             df = df[df["Número"].astype(str).str.contains(buscar, case=False, na=False)]
 
-        disp_cols = ["Número","Es repetitiva","Fecha Inicio","Fecha Final","Equipos","R/I","Descripción"]
+        disp_cols_want = ["Número","Es repetitiva","Fecha Inicio","Fecha Final","Equipos","R/I","Descripción"]
+        disp_cols = [c for c in disp_cols_want if c in df.columns]
         st.caption(f"{len(df)} libranzas")
 
         edited = st.data_editor(
@@ -1342,7 +1358,11 @@ def vista_premisas():
         if buscar_v:
             df_v = df_v[df_v["Número"].astype(str).str.contains(buscar_v, case=False, na=False)]
 
-        disp_v = ["Número","Es repetitiva","Fecha Inicio","Fecha Final","Equipos","Descripción"]
+        disp_v_want = ["Número","Es repetitiva","Fecha Inicio","Fecha Final","Equipos","Descripción"]
+        disp_v = [c for c in disp_v_want if c in df_v.columns]
+        if not disp_v:
+            st.warning(f"Columnas disponibles: {list(df_v.columns)}")
+            disp_v = list(df_v.columns)
         st.caption(f"{len(df_v)} libranzas")
         edited_v = st.data_editor(
             df_v[disp_v].reset_index(drop=True),
