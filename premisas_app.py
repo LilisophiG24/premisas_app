@@ -9,7 +9,16 @@ from openpyxl.utils import get_column_letter
 from io import BytesIO
 import re
 import copy
+import traceback
+import sys
 
+try:
+    pass  # el resto del código va aquí
+except Exception as e:
+    import streamlit as st
+    st.error(f"Error: {e}")
+    st.text(traceback.format_exc())
+  
 st.markdown("""
 <style>
 .week-badge {background:#1F3864;color:white;padding:6px 18px;border-radius:6px;
@@ -1468,3 +1477,6 @@ try:
 except Exception:
     pass  # already set by parent app when imported
 vista_premisas()
+
+
+st.write(f"Python: {sys.version}")
