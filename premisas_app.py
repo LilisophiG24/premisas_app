@@ -11,6 +11,7 @@ import re
 import copy
 import traceback
 import sys
+import gc
 
 _PAGE_CSS = """
 <style>
@@ -937,7 +938,12 @@ def _clear_rows(ws, min_row):
 
 def export_premisas(state):
     """Generate updated plantilla Excel (without Lineas, Datos, LIBRANZAS NUEVAS/VIEJAS)."""
-    wb_template = load_workbook(BytesIO(state["prem_plantilla_bytes"]))
+    import gc
+    # Load workbook — free the bytes reference immediately to reduce peak memory
+    _raw_bytes = state["prem_plantilla_bytes"]
+    wb_template = load_workbook(BytesIO(_raw_bytes))
+    del _raw_bytes
+    gc.collect()
 
     # ── Remove unwanted sheets ────────────────────────────────────────
     for sheet_name in ["Lineas", "Datos", "LIBRANZAS NUEVAS", "LIBRANZAS VIEJAS"]:
@@ -1230,6 +1236,7 @@ def vista_premisas():
                 if st.button("📦 Preparar exportación", use_container_width=True):
                     with st.spinner("Generando archivo..."):
                         try:
+                            gc.collect()
                             st.session_state.prem_export_bytes = export_premisas({
                                 "prem_plantilla_bytes": st.session_state.prem_plantilla_bytes,
                                 "prem_current_week":    st.session_state.prem_current_week,
@@ -1240,9 +1247,10 @@ def vista_premisas():
                                 "prem_indisp_data":     st.session_state.prem_indisp_data,
                                 "prem_df_proyectos":    st.session_state.prem_df_proyectos,
                             })
+                            gc.collect()
                             st.success("✅ Archivo listo para descargar")
-                        except Exception as _exp:
-                            st.error(f"❌ Error al generar el archivo: {_exp}")
+                        except BaseException as _exp:
+                            st.error(f"❌ Error al generar el archivo: {type(_exp).__name__}: {_exp}")
                             st.code(traceback.format_exc())
                 if st.session_state.get("prem_export_bytes"):
                     st.download_button(
