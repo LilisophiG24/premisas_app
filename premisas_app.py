@@ -1448,7 +1448,10 @@ def vista_premisas():
 
 
 
-vista_premisas()
+try:
+    vista_premisas()
+except Exception as _e:
+    st.error(f"**Error al iniciar la app:** {_e}")
+    st.code(traceback.format_exc())
 
 
-st.write(f"Python: {sys.version}")
