@@ -12,15 +12,7 @@ import copy
 import traceback
 import sys
 
-try:
-    st.set_page_config(
-        page_title="Premisas CND", page_icon="⚡",
-        layout="wide", initial_sidebar_state="expanded"
-    )
-except Exception:
-    pass  # already set by parent app when imported
-
-st.markdown("""
+_PAGE_CSS = """
 <style>
 .week-badge {background:#1F3864;color:white;padding:6px 18px;border-radius:6px;
              font-size:1.2rem;font-weight:bold;display:inline-block;}
@@ -28,31 +20,19 @@ st.markdown("""
 .tag-r  {background:#d4edda;color:#155724;padding:1px 6px;border-radius:3px;font-size:.8rem;font-weight:bold;}
 .tag-i  {background:#fff3cd;color:#856404;padding:1px 6px;border-radius:3px;font-size:.8rem;font-weight:bold;}
 .tag-ri {background:#cce5ff;color:#004085;padding:1px 6px;border-radius:3px;font-size:.8rem;font-weight:bold;}
-
-/* Data editor: better contrast and auto row height */
 div[data-testid="stDataFrame"] .ag-cell {
-    color: #ffffff !important;
-    font-weight: 500 !important;
-    white-space: normal !important;
-    line-height: 1.4 !important;
-    padding-top: 6px !important;
-    padding-bottom: 6px !important;
+    color: #ffffff !important; font-weight: 500 !important;
+    white-space: normal !important; line-height: 1.4 !important;
+    padding-top: 6px !important; padding-bottom: 6px !important;
 }
 div[data-testid="stDataFrame"] .ag-cell-value {
-    white-space: normal !important;
-    overflow: visible !important;
-    word-break: break-word !important;
+    white-space: normal !important; overflow: visible !important; word-break: break-word !important;
 }
-div[data-testid="stDataFrame"] .ag-row {
-    height: auto !important;
-    min-height: 42px !important;
-}
-div[data-testid="stDataFrame"] .ag-header-cell-label {
-    font-weight: 700 !important;
-    color: #ffffff !important;
-}
+div[data-testid="stDataFrame"] .ag-row { height: auto !important; min-height: 42px !important; }
+div[data-testid="stDataFrame"] .ag-header-cell-label { font-weight: 700 !important; color: #ffffff !important; }
 </style>
-""", unsafe_allow_html=True)
+"""
+
 
 # ══════════════════════════════════════════════════════════════════════
 # CONSTANTS
@@ -1139,6 +1119,14 @@ def export_premisas(state):
 # MAIN APP
 # ══════════════════════════════════════════════════════════════════════
 def vista_premisas():
+    try:
+        st.set_page_config(
+            page_title="Premisas CND", page_icon="⚡",
+            layout="wide", initial_sidebar_state="expanded"
+        )
+    except Exception:
+        pass
+    st.markdown(_PAGE_CSS, unsafe_allow_html=True)
     st.markdown("## ⚡ Módulo de Premisas")
 
     # ── Session state init ────────────────────────────────────────────
