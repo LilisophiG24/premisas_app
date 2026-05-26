@@ -13,12 +13,13 @@ import traceback
 import sys
 
 try:
-    pass  # el resto del código va aquí
-except Exception as e:
-    import streamlit as st
-    st.error(f"Error: {e}")
-    st.text(traceback.format_exc())
-  
+    st.set_page_config(
+        page_title="Premisas CND", page_icon="⚡",
+        layout="wide", initial_sidebar_state="expanded"
+    )
+except Exception:
+    pass  # already set by parent app when imported
+
 st.markdown("""
 <style>
 .week-badge {background:#1F3864;color:white;padding:6px 18px;border-radius:6px;
@@ -730,7 +731,7 @@ def process_viejas(df_raw):
         })
     return pd.DataFrame(out_rows)
 
-def build_relevantes(df_nuevas, df_viejas, lineas_lookup, relevantes_anteriores=None, week_start=None):
+def build_relevantes(df_nuevas, df_viejas, lineas_lookup, relevantes_anteriores=None, week_start=None, lineas_codes=None):
     """Build relevantes from R-libranzas in nuevas + viejas + previous plantilla, sorted by Fecha Inicio."""
     rows = []
     seen_libranzas = set()  # track by Libranza number to avoid duplicates
@@ -738,7 +739,7 @@ def build_relevantes(df_nuevas, df_viejas, lineas_lookup, relevantes_anteriores=
     def add_relevantes_from(df, classify=False):
         if df is None or df.empty: return
         for _, row in df.iterrows():
-            ri = row.get("R/I","") if not classify else classify_libranza(row)
+            ri = row.get("R/I","") if not classify else classify_libranza(row, lineas_codes)
             if "R" not in str(ri): continue
             eq_up = str(row.get("Equipos","") or "").upper()
             if "GENERADOR AUXILIAR" in eq_up and not any(
@@ -920,31 +921,6 @@ def detect_proyectos_from_libranzas(df_viejas, df_nuevas, df_proy_existing):
     if not new_rows: return df_proy_existing
     df_new = pd.DataFrame(new_rows)
     return pd.concat([df_proy_existing, df_new], ignore_index=True)
-    """Update Sem Disp (from fecha_fin lookup) and Sem Prueba (replace week number)."""
-    if df_proy.empty: return df_proy
-    df = df_proy.copy()
-    prev_week = current_week - 1
-
-    for idx, row in df.iterrows():
-        # ── Sem Disp: look up fecha_fin in calendar ──────────────────
-        raw = row.get("_fecha_fin_raw")
-        fecha_str = row.get("Fecha finaliza libranza","")
-        dt = parse_dt(raw) if (raw is not None and str(raw) not in ["None","nan",""]) \
-             else parse_dt(fecha_str)
-        if dt is not None:
-            wn = find_week_for_date(dt, weeks)
-            if wn is not None:
-                df.at[idx,"Sem Disp"] = f"Semana {wn}"
-
-        # ── Sem Prueba: replace previous week number with current ─────
-        sem_p = str(row.get("Sem Prueba","") or "")
-        if sem_p and str(prev_week) in sem_p:
-            df.at[idx,"Sem Prueba"] = re.sub(
-                rf'\bSemana\s+{prev_week}\b',
-                f'Semana {current_week}',
-                sem_p
-            )
-    return df
 
 # ══════════════════════════════════════════════════════════════════════
 # EXPORT
@@ -1216,7 +1192,7 @@ def vista_premisas():
                     df_nuevas    = process_nuevas(df_src_nuevas, lineas_codes, unit_mw, plant_prefix)
                     df_viejas    = process_viejas(df_src_viejas)
                     df_relevantes= build_relevantes(df_nuevas, df_viejas, lineas,
-                                                    rel_ant, week_start)
+                                                    rel_ant, week_start, lineas_codes)
                     indisp_data  = build_indisponibilidades(
                                         indisp_exist, df_viejas, df_nuevas,
                                         unit_mw, plant_prefix, weeks, current_week,
@@ -1240,6 +1216,8 @@ def vista_premisas():
                         "prem_procesado":       True,
                         "prem_relevantes_anteriores": rel_ant,
                         "prem_week_start":      week_start,
+                        "prem_indisp_existing": indisp_exist,
+                        "prem_indisp_file_df":  indisp_file_df,
                     })
                     st.success(f"✅ Semana {current_week} procesada")
                     st.rerun()
@@ -1347,12 +1325,14 @@ def vista_premisas():
             st.session_state.prem_df_relevantes = build_relevantes(
                 full, st.session_state.prem_df_viejas, st.session_state.prem_lineas_lookup,
                 st.session_state.get("prem_relevantes_anteriores",[]),
-                st.session_state.get("prem_week_start"))
+                st.session_state.get("prem_week_start"),
+                st.session_state.get("prem_lineas_codes"))
             st.session_state.prem_indisp_data = build_indisponibilidades(
-                st.session_state.get("prem_indisp_data", pd.DataFrame())._prev if False else [],
+                st.session_state.get("prem_indisp_existing", []),
                 st.session_state.prem_df_viejas, full,
                 st.session_state.get("prem_unit_mw",{}),
-                st.session_state.get("prem_plant_prefix",{}), weeks, cw)
+                st.session_state.get("prem_plant_prefix",{}), weeks, cw,
+                indisp_file_df=st.session_state.get("prem_indisp_file_df"))
             st.success("Cambios aplicados")
             st.rerun()
 
@@ -1468,14 +1448,6 @@ def vista_premisas():
 
 
 
-# ── Standalone execution ──────────────────────────────────────────────
-try:
-    st.set_page_config(
-        page_title="Premisas CND", page_icon="⚡",
-        layout="wide", initial_sidebar_state="expanded"
-    )
-except Exception:
-    pass  # already set by parent app when imported
 vista_premisas()
 
 
