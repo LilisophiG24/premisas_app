@@ -1229,16 +1229,21 @@ def vista_premisas():
             if st.session_state.prem_df_nuevas is not None:
                 if st.button("📦 Preparar exportación", use_container_width=True):
                     with st.spinner("Generando archivo..."):
-                        st.session_state.prem_export_bytes = export_premisas({
-                            "prem_plantilla_bytes": st.session_state.prem_plantilla_bytes,
-                            "prem_current_week":    st.session_state.prem_current_week,
-                            "prem_weeks":           st.session_state.prem_weeks,
-                            "prem_df_nuevas":       st.session_state.prem_df_nuevas,
-                            "prem_df_viejas":       st.session_state.prem_df_viejas,
-                            "prem_df_relevantes":   st.session_state.prem_df_relevantes,
-                            "prem_indisp_data":   st.session_state.prem_indisp_data,
-                            "prem_df_proyectos":    st.session_state.prem_df_proyectos,
-                        })
+                        try:
+                            st.session_state.prem_export_bytes = export_premisas({
+                                "prem_plantilla_bytes": st.session_state.prem_plantilla_bytes,
+                                "prem_current_week":    st.session_state.prem_current_week,
+                                "prem_weeks":           st.session_state.prem_weeks,
+                                "prem_df_nuevas":       st.session_state.prem_df_nuevas,
+                                "prem_df_viejas":       st.session_state.prem_df_viejas,
+                                "prem_df_relevantes":   st.session_state.prem_df_relevantes,
+                                "prem_indisp_data":     st.session_state.prem_indisp_data,
+                                "prem_df_proyectos":    st.session_state.prem_df_proyectos,
+                            })
+                            st.success("✅ Archivo listo para descargar")
+                        except Exception as _exp:
+                            st.error(f"❌ Error al generar el archivo: {_exp}")
+                            st.code(traceback.format_exc())
                 if st.session_state.get("prem_export_bytes"):
                     st.download_button(
                         "📥 Descargar plantilla",
