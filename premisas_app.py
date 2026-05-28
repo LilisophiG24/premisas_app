@@ -1022,55 +1022,51 @@ def _clear_rows(ws, min_row):
                 pass  # skip merged cells
 
 def export_premisas(state):
-    """Generate updated plantilla Excel (without Lineas, Datos, LIBRANZAS NUEVAS/VIEJAS)."""
-    wb_template = load_workbook(BytesIO(state["prem_plantilla_bytes"]))
+    """Generate updated plantilla Excel - memory optimized."""
+    import gc
+    gc.collect()
+
+    wb_template = load_workbook(BytesIO(state["prem_plantilla_bytes"]),
+                                keep_links=False)
+    gc.collect()
 
     # ── Remove unwanted sheets ────────────────────────────────────────
     for sheet_name in ["Lineas", "Datos", "LIBRANZAS NUEVAS", "LIBRANZAS VIEJAS"]:
         if sheet_name in wb_template.sheetnames:
             del wb_template[sheet_name]
+    gc.collect()
 
     # ── LIBRANZAS RELEVANTES ─────────────────────────────────────────
     ws = wb_template["Libranzas Relevantes"]
     for merge in list(ws.merged_cells.ranges): ws.unmerge_cells(str(merge))
     _clear_rows(ws, 3)
     _hdr(ws, PLANTILLA_REL_COLS, row=2)
-    df_r = state.get("prem_df_relevantes", pd.DataFrame())
-    if not df_r.empty:
-        BLUE_FILL_R  = PatternFill("solid", fgColor="BDD7EE")   # blue for viejas
-        GREEN_FILL   = PatternFill("solid", fgColor="C6EFCE")   # green for Continua
-        PINK_FILL    = PatternFill("solid", fgColor="FFB6C1")   # pink for Repetitiva
+    df_r = state.get("prem_df_relevantes")
+    if df_r is not None and not df_r.empty:
+        BLUE_FILL_R  = PatternFill("solid", fgColor="BDD7EE")
+        GREEN_FILL   = PatternFill("solid", fgColor="C6EFCE")
+        PINK_FILL    = PatternFill("solid", fgColor="FFB6C1")
         WHITE_FILL_R = PatternFill("solid", fgColor="FFFFFF")
-
         for ri, (_, r) in enumerate(df_r.iterrows(), 3):
-            status = str(r.get("_status","")) if "_status" in r.index else ""
+            status   = str(r.get("_status","")) if "_status" in r.index else ""
             is_vieja = status == "vieja"
             tipo_val = str(r.get("Tipo","")).strip().lower()
-
             for ci, col in enumerate(PLANTILLA_REL_COLS, 1):
                 val = r.get(col,"") if col in r.index else ""
                 try:
                     cell = ws.cell(ri, ci, val)
-                    cell.font      = DATA_FONT
-                    cell.border    = BORD
-                    cell.alignment = WRAP
-                    cell.fill      = WHITE_FILL_R
-
-                    # Tipo col (ci=1): green=Continua, pink=Repetitiva
+                    cell.font = DATA_FONT; cell.border = BORD
+                    cell.alignment = WRAP; cell.fill = WHITE_FILL_R
                     if ci == 1:
-                        if "continua" in tipo_val:
-                            cell.fill = GREEN_FILL
-                        elif "repetitiva" in tipo_val:
-                            cell.fill = PINK_FILL
-
-                    # Blue ONLY on Libranza column (ci=9) for viejas
+                        cell.fill = GREEN_FILL if "continua" in tipo_val else (PINK_FILL if "repetitiva" in tipo_val else WHITE_FILL_R)
                     elif ci == 9 and is_vieja:
                         cell.fill = BLUE_FILL_R
                         cell.font = Font(size=9, bold=True)
                 except: pass
+    del df_r; gc.collect()
 
     # ── INDISPONIBILIDADES ───────────────────────────────────────────
-    BLUE_FILL  = PatternFill("solid", fgColor="BDD7EE")   # blue for viejas
+    BLUE_FILL  = PatternFill("solid", fgColor="BDD7EE")
     TOTAL_FONT = Font(bold=True, size=9)
 
     ws = wb_template["Indisponibilidades"]
@@ -1212,6 +1208,8 @@ def export_premisas(state):
                 cell.border = Border()
             except: pass
 
+    del indisp_df; gc.collect()
+
     # ── PROYECTOS DE GENERACIÓN ──────────────────────────────────────
     ws = wb_template["Proyectos de Generacion"]
     df_p = state.get("prem_df_proyectos", pd.DataFrame())
@@ -1231,8 +1229,11 @@ def export_premisas(state):
                     ws.cell(ri2, ci).value = r.get(col,"")
                     ws.cell(ri2, ci).font = DATA_FONT
 
+    gc.collect()
     buf = BytesIO()
     wb_template.save(buf)
+    wb_template.close()
+    del wb_template; gc.collect()
     buf.seek(0)
     return buf.read()
 
