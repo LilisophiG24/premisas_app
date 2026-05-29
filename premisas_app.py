@@ -1511,77 +1511,118 @@ def vista_premisas():
         st.subheader(f"Indisponibilidades — Semana {cw}")
         indisp_data = st.session_state.get("prem_indisp_data")
         if indisp_data is None or (hasattr(indisp_data,'empty') and indisp_data.empty):
-            st.info("No hay indisponibilidades registradas. Se generan automáticamente de las libranzas viejas y nuevas (I).")
+            st.info("No hay indisponibilidades registradas.")
         else:
             df_id = indisp_data.copy()
             n_v = (df_id["status"]=="vieja").sum()
             n_n = (df_id["status"]=="nueva").sum()
             total_hp = pd.to_numeric(df_id["Potencia (MW)"], errors="coerce").sum()
-            st.info(f"**{len(df_id)} indisponibilidades** — 🔵 {n_v} de semanas anteriores | 🟢 {n_n} nuevas | Total HP aprox: **{total_hp:.2f} MW**")
+            st.info(f"**{len(df_id)}** — 🔵 {n_v} anteriores | 🟢 {n_n} nuevas | Total HP: **{total_hp:.2f} MW**")
 
-            disp_i = ["Unidad","Fecha inicio","Fecha final","Potencia (MW)","Libranza","Descripción","status"]
+            buscar_id = st.text_input("🔍 Buscar", key="prem_search_indisp",
+                                      placeholder="Ej: CELSIACENT o BAYG3")
+            df_id_show = df_id.copy()
+            if buscar_id:
+                mask_id = df_id_show.apply(
+                    lambda r: buscar_id.lower() in " ".join(str(v) for v in r.values).lower(), axis=1)
+                df_id_show = df_id_show[mask_id]
+
+            # Add emoji indicator to status for visual reference
+            df_id_edit = df_id_show.copy()
+            disp_i = [c for c in ["Unidad","Fecha inicio","Fecha final","Potencia (MW)",
+                                   "Libranza","Descripción","status"] if c in df_id_edit.columns]
+            st.caption(f"{len(df_id_show)} indisponibilidades · 🔵=anterior (azul en Excel) · 🟢=nueva")
+
             edited_id = st.data_editor(
-                df_id[disp_i].reset_index(drop=True),
-                use_container_width=True, hide_index=True,
-                num_rows="dynamic", key="prem_editor_indisp", height=450,
+                df_id_edit[disp_i].reset_index(drop=True),
+                use_container_width=True, hide_index=True, num_rows="dynamic",
+                key="prem_editor_indisp", height=500,
                 column_config={
-                    "status": st.column_config.SelectboxColumn("Estado", options=["vieja","nueva"], width="small"),
+                    "status": st.column_config.SelectboxColumn(
+                        "🔵/🟢 Estado", options=["vieja","nueva"], width="small"),
                     "Potencia (MW)": st.column_config.NumberColumn("Potencia (MW)", format="%.2f"),
+                    "Libranza": st.column_config.TextColumn("Libranza 🔵=anterior"),
+                    "Unidad": st.column_config.TextColumn("Unidad"),
+                    "Descripción": st.column_config.TextColumn("Descripción", width="large"),
                 }
             )
-            if st.button("💾 Aplicar cambios", key="prem_apply_indisp"):
-                # Merge edits back
+            if st.button("💾 Guardar cambios", key="prem_apply_indisp"):
                 full_id = st.session_state.prem_indisp_data.copy()
-                full_id = full_id.iloc[edited_id.index.tolist()].reset_index(drop=True)
-                for col in ["Potencia (MW)","status"]:
-                    if col in edited_id.columns:
-                        full_id[col] = edited_id[col].values
-                st.session_state.prem_indisp_data = full_id
-                st.success("Cambios aplicados"); st.rerun()
+                if buscar_id:
+                    mask = full_id.apply(
+                        lambda r: buscar_id.lower() in " ".join(str(v) for v in r.values).lower(), axis=1)
+                    for col in ["Potencia (MW)","status","Descripción"]:
+                        if col in edited_id.columns and len(edited_id) == mask.sum():
+                            full_id.loc[mask, col] = edited_id[col].values
+                else:
+                    for col in ["Potencia (MW)","status","Descripción"]:
+                        if col in edited_id.columns:
+                            full_id[col] = edited_id[col].values
+                    # Handle added/deleted rows
+                    if len(edited_id) != len(full_id):
+                        full_id = edited_id.copy()
+                        if "status" not in full_id.columns:
+                            full_id["status"] = "nueva"
+                        for col in [c for c in full_id.columns if c not in edited_id.columns]:
+                            full_id[col] = ""
+                st.session_state.prem_indisp_data = full_id.reset_index(drop=True)
+                st.success("✅ Guardado")
 
     # ── TAB 3: Libranzas Relevantes ───────────────────────────────────
     with tabs[3]:
         st.subheader(f"Libranzas Relevantes — Semana {cw}")
-        df_rel = st.session_state.prem_df_relevantes.copy() if st.session_state.prem_df_relevantes is not None else pd.DataFrame(columns=PLANTILLA_REL_COLS)
+        df_rel = (st.session_state.prem_df_relevantes.copy()
+                  if st.session_state.prem_df_relevantes is not None
+                  else pd.DataFrame(columns=PLANTILLA_REL_COLS))
         if df_rel.empty:
             st.info("No hay libranzas clasificadas como R.")
         else:
-            st.info(f"**{len(df_rel)} relevantes**")
-            buscar_r = st.text_input("🔍 Buscar", key="prem_search_rel", placeholder="Ej: ETESA-688 o 230-4A")
-            disp_r = [c for c in ["Tipo","Fecha inicio","Fecha final","Tipo de Equipos","Equipo","Subestación","Libranza","Descripción del trabajo","Estado"] if c in df_rel.columns]
+            st.info(f"**{len(df_rel)} relevantes** · 🔵=vieja (azul en Excel) · "
+                    f"🟩=Continua · 🟥=Repetitiva")
+            buscar_r = st.text_input("🔍 Buscar", key="prem_search_rel",
+                                     placeholder="Ej: ETESA-688 o 230-4A")
+            disp_r = [c for c in ["Tipo","Fecha inicio","Fecha final","Tipo de Equipos",
+                                   "Equipo","Subestación","Libranza","Descripción del trabajo",
+                                   "Estado","_status"] if c in df_rel.columns]
             df_rel_show = df_rel[disp_r].copy()
             if buscar_r:
-                mask_r = df_rel_show.apply(lambda row: buscar_r.lower() in " ".join(str(v) for v in row.values).lower(), axis=1)
+                mask_r = df_rel_show.apply(
+                    lambda row: buscar_r.lower() in " ".join(str(v) for v in row.values).lower(), axis=1)
                 df_rel_show = df_rel_show[mask_r]
-            st.caption(f"{len(df_rel_show)} relevantes")
+            st.caption(f"{len(df_rel_show)} relevantes · Tipo: 🟩 Continua · 🟥 Repetitiva · "
+                       f"Libranza: 🔵 vieja de semana anterior")
 
             edited_r = st.data_editor(
                 df_rel_show.reset_index(drop=True),
-                use_container_width=True, hide_index=True,
-                num_rows="dynamic", key="prem_editor_rel", height=450
+                use_container_width=True, hide_index=True, num_rows="dynamic",
+                key="prem_editor_rel", height=500,
+                column_config={
+                    "Tipo": st.column_config.SelectboxColumn(
+                        "🟩/🟥 Tipo", options=["Continua","Repetitiva",""], width="small"),
+                    "_status": st.column_config.SelectboxColumn(
+                        "🔵 Estado", options=["vieja","nueva",""], width="small"),
+                    "Libranza": st.column_config.TextColumn("Libranza"),
+                    "Equipo": st.column_config.TextColumn("Equipo", width="large"),
+                    "Descripción del trabajo": st.column_config.TextColumn(
+                        "Descripción del trabajo", width="large"),
+                }
             )
             if st.button("💾 Guardar cambios", key="prem_apply_rel"):
                 full_rel = st.session_state.prem_df_relevantes.copy()
+                editable_cols_r = [c for c in disp_r if c in edited_r.columns]
                 if buscar_r:
-                    mask_full = full_rel[disp_r].apply(lambda row: buscar_r.lower() in " ".join(str(v) for v in row.values).lower(), axis=1)
-                    for col in disp_r:
-                        if col in edited_r.columns and len(edited_r) == mask_full.sum():
+                    mask_full = full_rel[disp_r].apply(
+                        lambda row: buscar_r.lower() in " ".join(str(v) for v in row.values).lower(), axis=1)
+                    for col in editable_cols_r:
+                        if len(edited_r) == mask_full.sum():
                             full_rel.loc[mask_full, col] = edited_r[col].values
                 else:
-                    for col in disp_r:
-                        if col in edited_r.columns: full_rel[col] = edited_r[col].values
-                st.session_state.prem_df_relevantes = full_rel
+                    for col in editable_cols_r:
+                        full_rel[col] = edited_r[col].values
+                    if len(edited_r) != len(full_rel):
+                        full_rel = edited_r.copy()
+                st.session_state.prem_df_relevantes = full_rel.reset_index(drop=True)
                 st.success("✅ Guardado")
-
-            with st.expander("👁 Vista previa Excel (colores)"):
-                sts_r = df_rel["_status"].values if "_status" in df_rel.columns else [""]*len(df_rel)
-                df_prev_r = df_rel[disp_r].reset_index(drop=True)
-                def _srel(row, _s=sts_r):
-                    idx = row.name; st_ = _s[idx] if idx<len(_s) else ""
-                    tipo = str(row.get("Tipo","")).lower() if "Tipo" in row.index else ""
-                    return ["background-color:#C6EFCE" if "continua" in tipo else ("background-color:#FFB6C1" if "repetitiva" in tipo else "") if col=="Tipo" else ("background-color:#BDD7EE;font-weight:bold" if col=="Libranza" and st_=="vieja" else "") for col in row.index]
-                try: st.dataframe(df_prev_r.style.apply(_srel, axis=1), use_container_width=True, hide_index=True, height=400)
-                except: st.dataframe(df_prev_r, use_container_width=True, hide_index=True, height=400)
 
     # ── TAB 4: Proyectos de Generación ───────────────────────────────
     with tabs[4]:
