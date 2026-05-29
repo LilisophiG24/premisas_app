@@ -1013,11 +1013,15 @@ def _write(ws, df, start_row=3):
             cell.font = DATA_FONT; cell.border = BORD; cell.alignment = WRAP
 
 def _clear_rows(ws, min_row):
-    """Clear data rows safely, skipping merged cells."""
+    """Clear data rows safely — values, fills and borders."""
+    _white = PatternFill("solid", fgColor="FFFFFF")
+    _none_border = Border()
     for row in ws.iter_rows(min_row=min_row, max_row=ws.max_row):
         for cell in row:
             try:
-                cell.value = None
+                cell.value  = None
+                cell.fill   = _white
+                cell.border = _none_border
             except AttributeError:
                 pass  # skip merged cells
 
@@ -1475,33 +1479,67 @@ def vista_premisas():
         st.subheader(f"Indisponibilidades — Semana {cw}")
         indisp_data = st.session_state.get("prem_indisp_data")
         if indisp_data is None or (hasattr(indisp_data,'empty') and indisp_data.empty):
-            st.info("No hay indisponibilidades registradas. Se generan automáticamente de las libranzas viejas y nuevas (I).")
+            st.info("No hay indisponibilidades registradas.")
         else:
             df_id = indisp_data.copy()
             n_v = (df_id["status"]=="vieja").sum()
             n_n = (df_id["status"]=="nueva").sum()
             total_hp = pd.to_numeric(df_id["Potencia (MW)"], errors="coerce").sum()
-            st.info(f"**{len(df_id)} indisponibilidades** — 🔵 {n_v} de semanas anteriores | 🟢 {n_n} nuevas | Total HP aprox: **{total_hp:.2f} MW**")
+            st.info(f"**{len(df_id)}** indisponibilidades — 🔵 {n_v} anteriores | 🟢 {n_n} nuevas | Total HP: **{total_hp:.2f} MW**")
 
-            disp_i = ["Unidad","Fecha inicio","Fecha final","Potencia (MW)","Libranza","Descripción","status"]
-            edited_id = st.data_editor(
-                df_id[disp_i].reset_index(drop=True),
-                use_container_width=True, hide_index=True,
-                num_rows="dynamic", key="prem_editor_indisp", height=450,
-                column_config={
-                    "status": st.column_config.SelectboxColumn("Estado", options=["vieja","nueva"], width="small"),
-                    "Potencia (MW)": st.column_config.NumberColumn("Potencia (MW)", format="%.2f"),
-                }
-            )
-            if st.button("💾 Aplicar cambios", key="prem_apply_indisp"):
-                # Merge edits back
-                full_id = st.session_state.prem_indisp_data.copy()
-                full_id = full_id.iloc[edited_id.index.tolist()].reset_index(drop=True)
-                for col in ["Potencia (MW)","status"]:
-                    if col in edited_id.columns:
-                        full_id[col] = edited_id[col].values
-                st.session_state.prem_indisp_data = full_id
-                st.success("Cambios aplicados"); st.rerun()
+            vista_i = st.radio("Vista:", ["✏️ Editar","👁 Vista previa Excel"], horizontal=True, key="prem_vista_indisp")
+
+            if vista_i == "✏️ Editar":
+                disp_i = ["Unidad","Fecha inicio","Fecha final","Potencia (MW)","Libranza","Descripción","status"]
+                edited_id = st.data_editor(
+                    df_id[[c for c in disp_i if c in df_id.columns]].reset_index(drop=True),
+                    use_container_width=True, hide_index=True,
+                    num_rows="dynamic", key="prem_editor_indisp", height=450,
+                    column_config={
+                        "status": st.column_config.SelectboxColumn("Estado", options=["vieja","nueva"], width="small"),
+                        "Potencia (MW)": st.column_config.NumberColumn("Potencia (MW)", format="%.2f"),
+                    }
+                )
+                if st.button("💾 Aplicar cambios", key="prem_apply_indisp"):
+                    full_id = st.session_state.prem_indisp_data.copy()
+                    full_id = full_id.iloc[edited_id.index.tolist()].reset_index(drop=True)
+                    for col in ["Potencia (MW)","status"]:
+                        if col in edited_id.columns: full_id[col] = edited_id[col].values
+                    st.session_state.prem_indisp_data = full_id
+                    st.success("Cambios aplicados"); st.rerun()
+            else:
+                # Preview grouped by day
+                week_dates = weeks.get(cw, [None]*7)
+                sab = week_dates[0]
+                fixed_dates = [sab + timedelta(days=i) if (d and sab and abs((d-sab).days)>7) else d for i,d in enumerate(week_dates)]
+                for i, dia in enumerate(DIAS_SEMANA):
+                    dt = fixed_dates[i] if i < len(fixed_dates) else None
+                    if dt is None: continue
+                    day_date = dt.date()
+                    day_rows = []
+                    for _, r in df_id.iterrows():
+                        fi = parse_dt(r.get("Fecha inicio",""))
+                        ff = parse_dt(r.get("Fecha final",""))
+                        if fi and ff and fi.date() <= day_date <= ff.date():
+                            day_rows.append(r)
+                    if not day_rows: continue
+                    day_rows = sorted(day_rows, key=lambda r: (0 if str(r.get("status",""))=="vieja" else 1, parse_dt(r.get("Fecha inicio","")) or datetime.max))
+                    day_total = sum(float(r.get("Potencia (MW)",0) or 0) for r in day_rows)
+                    st.markdown(f"**{dia.lower()} {day_date.day}** — Total HP: `{day_total:.2f} MW`")
+                    df_day = pd.DataFrame(day_rows)[["Unidad","Fecha inicio","Fecha final","Potencia (MW)","Libranza","Descripción"]]
+
+                    def style_indisp_row(row):
+                        idx = row.name
+                        status = day_rows[idx].get("status","") if idx < len(day_rows) else ""
+                        if status == "vieja":
+                            return ["","","","","background-color:#BDD7EE;font-weight:bold",""]
+                        return [""]*6
+
+                    try:
+                        styled = df_day.reset_index(drop=True).style.apply(style_indisp_row, axis=1)
+                        st.dataframe(styled, use_container_width=True, hide_index=True)
+                    except:
+                        st.dataframe(df_day.reset_index(drop=True), use_container_width=True, hide_index=True)
 
     # ── TAB 3: Libranzas Relevantes ───────────────────────────────────
     with tabs[3]:
@@ -1510,16 +1548,45 @@ def vista_premisas():
         if df_rel.empty:
             st.info("No hay libranzas clasificadas como R.")
         else:
+            vista_r = st.radio("Vista:", ["✏️ Editar","👁 Vista previa Excel"], horizontal=True, key="prem_vista_rel")
             disp_r = ["Tipo","Fecha inicio","Fecha final","Tipo de Equipos","Equipo","Subestación","Libranza","Descripción del trabajo","Estado"]
             cols_ok = [c for c in disp_r if c in df_rel.columns]
-            edited_r = st.data_editor(
-                df_rel[cols_ok].reset_index(drop=True),
-                use_container_width=True, hide_index=True,
-                num_rows="dynamic", key="prem_editor_rel", height=450
-            )
-            if st.button("💾 Aplicar cambios", key="prem_apply_rel"):
-                st.session_state.prem_df_relevantes = edited_r.reset_index(drop=True)
-                st.success("Cambios aplicados"); st.rerun()
+
+            if vista_r == "✏️ Editar":
+                edited_r = st.data_editor(
+                    df_rel[cols_ok].reset_index(drop=True),
+                    use_container_width=True, hide_index=True,
+                    num_rows="dynamic", key="prem_editor_rel", height=450
+                )
+                if st.button("💾 Aplicar cambios", key="prem_apply_rel"):
+                    st.session_state.prem_df_relevantes = edited_r.reset_index(drop=True)
+                    st.success("Cambios aplicados"); st.rerun()
+            else:
+                # Styled preview
+                df_prev = df_rel[cols_ok].reset_index(drop=True)
+                statuses = df_rel["_status"].values if "_status" in df_rel.columns else [""] * len(df_rel)
+
+                def style_rel(row):
+                    idx = row.name
+                    status = statuses[idx] if idx < len(statuses) else ""
+                    tipo = str(row.get("Tipo","")).strip().lower() if "Tipo" in row.index else ""
+                    styles = []
+                    for col in row.index:
+                        if col == "Tipo":
+                            if "continua" in tipo: styles.append("background-color:#C6EFCE")
+                            elif "repetitiva" in tipo: styles.append("background-color:#FFB6C1")
+                            else: styles.append("")
+                        elif col == "Libranza" and status == "vieja":
+                            styles.append("background-color:#BDD7EE;font-weight:bold")
+                        else:
+                            styles.append("")
+                    return styles
+
+                try:
+                    styled = df_prev.style.apply(style_rel, axis=1)
+                    st.dataframe(styled, use_container_width=True, hide_index=True, height=450)
+                except:
+                    st.dataframe(df_prev, use_container_width=True, hide_index=True, height=450)
 
     # ── TAB 4: Proyectos de Generación ───────────────────────────────
     with tabs[4]:
