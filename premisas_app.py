@@ -142,30 +142,6 @@ SPECIAL_PLANTS = {
     'ESTI','ESTÍ','GATÚN','GATUN','GENERADORA GATUN','GATUN II'
 }
 
-@st.cache_data(show_spinner=False)
-def load_equipos_db(file_bytes):
-    """Load equipos_libranzas.xlsx → (db, etesa_codes, etesa_locs)."""
-    try:
-        wb = load_workbook(BytesIO(file_bytes), data_only=True)
-        ws = wb.active
-        db, etesa_codes, etesa_locs = {}, set(), set()
-        for row in ws.iter_rows(min_row=3, values_only=True):
-            if not row[0]: continue
-            code   = str(row[1] or "").strip().upper()
-            agent  = str(row[2] or "").strip().upper()
-            instal = str(row[3] or "").strip().upper()
-            tipo   = str(row[4] or "").strip().upper()
-            extras = str(row[5] or "").strip().upper()
-            if not code: continue
-            db.setdefault(code, []).append((agent, instal, tipo, extras))
-            if agent == "ETESA" or "ETESA" in extras:
-                etesa_codes.add(code)
-                if "->" in instal:
-                    loc = instal.split("->")[-1].strip()
-                    if loc: etesa_locs.add(loc)
-        return db, etesa_codes, etesa_locs
-    except: return {}, set(), set()
-
 def build_lineas_set(ws_lineas):
     """Build set of equipment codes from Lineas sheet (col B)."""
     codes = set()
@@ -269,7 +245,7 @@ def get_unit_name_and_mw(row, unit_mw, plant_prefix):
             labels.append(code)
     return (' '.join(labels) if labels else get_unit_from_equipos(equipos)), total_mw
 
-def classify_libranza(row, lineas_codes=None, unit_mw=None, plant_prefix=None, equipos_db=None):
+def classify_libranza(row, lineas_codes=None, unit_mw=None, plant_prefix=None):
     """Return 'R', 'I', 'R-I' or '' for a libranza row."""
     numero = str(row.get("Número","") or "").upper()
     eq     = str(row.get("Equipos","") or "")
@@ -278,41 +254,33 @@ def classify_libranza(row, lineas_codes=None, unit_mw=None, plant_prefix=None, e
     is_i   = False
     is_r   = False
 
-    # ── Hard excludes — never R or I ───────────────────────────
+    # ── Exclude "libranza informativa" → never R ───────────────
     if "libranza informativa" in desc or "lib. informativa" in desc:
-        return ""
+        is_r = False
     is_distrib = any(numero.startswith(a) for a in DISTRIBUTION_AGENTS)
     if is_distrib and any(k in desc or k in eq_up.lower() for k in DISTRIBUTION_KW):
         return ""
-    # SCADA/fibra/comunicaciones → never R regardless of agent or equipos_db
-    if any(k in desc for k in SCADA_KW):
-        return ""
 
-    # ── I: non-ETESA ───────────────────────────────────────────
+    # ── I: non-ETESA, non-SCADA ────────────────────────────────
     if not numero.startswith("ETESA-"):
-        is_i = True
+        if not any(k in desc for k in SCADA_KW):
+            is_i = True
 
     # ── R: ETESA equipment checked against Lineas sheet ────────
     if numero.startswith("ETESA-"):
-        # GENERADOR AUXILIAR alone → never R for ETESA
-        eq_codes_etesa = extract_equip_codes(eq)
-        eq_codes_etesa -= {"GENERADOR AUXILIAR", "GEN AUX", "GENERADOR AUX"}
-        only_genaux = not eq_codes_etesa and "GENERADOR AUXILIAR" in eq_up
-        if not only_genaux:
-            if lineas_codes and eq_codes_etesa & lineas_codes:
+        if lineas_codes:
+            codes = extract_equip_codes(eq)
+            # Exclude auxiliary generators from R
+            codes -= {"GENERADOR AUXILIAR", "GEN AUX", "GENERADOR AUX"}
+            if codes & lineas_codes:
                 is_r = True
-            if not is_r:
-                if R_LINE_RE.search(eq_up): is_r = True
-            if not is_r and "BANCO DE CAPACITORES" in eq_up: is_r = True
-            # STATCOM/SPEAR only if NOT inside a GENERADOR AUXILIAR name
-            if not is_r:
-                if ("STATCOM" in eq_up and "GENAUX" not in eq_up
-                        and "GENERADOR AUXILIAR" not in eq_up): is_r = True
-                if "SPEAR" in eq_up: is_r = True
-            if not is_r:
-                for t in R_EQUIP_TYPES:
-                    if t in eq_up and R_VOLT_RE.search(eq_up):
-                        is_r = True; break
+        if not is_r:
+            if R_LINE_RE.search(eq_up): is_r = True
+            if "BANCO DE CAPACITORES" in eq_up: is_r = True
+            if "STATCOM" in eq_up or "SPEAR" in eq_up: is_r = True
+            for t in R_EQUIP_TYPES:
+                if t in eq_up and R_VOLT_RE.search(eq_up):
+                    is_r = True; break
 
     # ── R: Special large plants → always R+I ───────────────────
     if is_i and not is_r:
@@ -321,20 +289,6 @@ def classify_libranza(row, lineas_codes=None, unit_mw=None, plant_prefix=None, e
             if m:
                 pname = m.group(1).strip().upper()
                 if any(sp in pname or pname in sp for sp in SPECIAL_PLANTS):
-                    is_r = True; break
-
-    # ── R: equipos_db — equipment owned/shared by ETESA ────────
-    # Only applies if not GENERADOR AUXILIAR only
-    if not is_r and equipos_db:
-        _, etesa_codes_db, etesa_locs_db = equipos_db
-        eq_codes_db = extract_equip_codes(eq)
-        # Remove GENERADOR AUXILIAR codes from check
-        eq_codes_db -= {"GENERADOR AUXILIAR", "GEN AUX", "GENERADOR AUX"}
-        if eq_codes_db and eq_codes_db & etesa_codes_db:
-            is_r = True
-        if not is_r and eq_codes_db:
-            for loc in etesa_locs_db:
-                if loc and len(loc) > 3 and loc in eq_up:
                     is_r = True; break
 
     # ── R: Other agents >60 MW ─────────────────────────────────
@@ -715,7 +669,7 @@ def find_week_for_date(target, weeks):
 # ══════════════════════════════════════════════════════════════════════
 # PROCESSORS
 # ══════════════════════════════════════════════════════════════════════
-def process_nuevas(df_raw, lineas_codes=None, unit_mw=None, plant_prefix=None, equipos_db=None):
+def process_nuevas(df_raw, lineas_codes=None, unit_mw=None, plant_prefix=None):
     """Filter and classify libranzas nuevas."""
     if df_raw.empty: return pd.DataFrame(columns=PLANTILLA_LIB_COLS)
     # Exclude ALL Cancelado + ALL Emergencia
@@ -725,7 +679,7 @@ def process_nuevas(df_raw, lineas_codes=None, unit_mw=None, plant_prefix=None, e
 
     out_rows = []
     for _, row in df.iterrows():
-        ri = classify_libranza(row, lineas_codes, unit_mw, plant_prefix, equipos_db)
+        ri = classify_libranza(row, lineas_codes, unit_mw, plant_prefix)
         out_rows.append({
             "Número":           row["Número"],
             "Tipo":             row["Tipo"],
@@ -747,14 +701,14 @@ def process_nuevas(df_raw, lineas_codes=None, unit_mw=None, plant_prefix=None, e
         })
     return pd.DataFrame(out_rows)
 
-def process_viejas(df_raw, lineas_codes=None, unit_mw=None, plant_prefix=None, equipos_db=None):
+def process_viejas(df_raw, lineas_codes=None, unit_mw=None, plant_prefix=None):
     """Filter libranzas viejas: keep only Aprobado and Recibido, classify R/I."""
     if df_raw.empty: return pd.DataFrame(columns=PLANTILLA_LIB_COLS)
     keep = ["Aprobado","Recibido"]
     df = df_raw[df_raw["Último Estado"].str.strip().isin(keep)].copy()
     out_rows = []
     for _, row in df.iterrows():
-        ri = classify_libranza(row, lineas_codes, unit_mw, plant_prefix, equipos_db)
+        ri = classify_libranza(row, lineas_codes, unit_mw, plant_prefix)
         out_rows.append({
             "Número":           row["Número"],
             "Tipo":             row["Tipo"],
@@ -1060,13 +1014,16 @@ def _write(ws, df, start_row=3):
 
 def _clear_rows(ws, min_row):
     """Clear data rows safely — values, fills and borders."""
-    _wf = PatternFill("solid", fgColor="FFFFFF")
-    _nb = Border()
+    _white = PatternFill("solid", fgColor="FFFFFF")
+    _none_border = Border()
     for row in ws.iter_rows(min_row=min_row, max_row=ws.max_row):
         for cell in row:
             try:
-                cell.value = None; cell.fill = _wf; cell.border = _nb
-            except AttributeError: pass
+                cell.value  = None
+                cell.fill   = _white
+                cell.border = _none_border
+            except AttributeError:
+                pass  # skip merged cells
 
 def export_premisas(state):
     """Generate updated plantilla Excel (without Lineas, Datos, LIBRANZAS NUEVAS/VIEJAS)."""
@@ -1306,8 +1263,7 @@ def vista_premisas():
         f_plantilla = st.file_uploader("1. Plantilla semana anterior", type="xlsx", key="prem_up_plantilla")
         f_nuevas    = st.file_uploader("2. libranzas_nuevas.xlsx",     type="xlsx", key="prem_up_nuevas")
         f_viejas    = st.file_uploader("3. libranzas_viejas.xlsx",     type="xlsx", key="prem_up_viejas")
-        f_indisp    = st.file_uploader("4. Indisponibilidades (opcional)", type="xlsx", key="prem_up_indisp")
-        # equipos_libranzas.xlsx loaded automatically from repo
+        f_indisp    = st.file_uploader("4. Archivo indisponibilidades (opcional)", type="xlsx", key="prem_up_indisp")
 
         st.divider()
         btn_process = st.button("⚙️ Procesar", type="primary", use_container_width=True,
@@ -1321,9 +1277,6 @@ def vista_premisas():
                     df_src_nuevas = load_source_libranzas(f_nuevas.read())
                     df_src_viejas = load_source_libranzas(f_viejas.read())
                     indisp_file_df = load_indisp_file(f_indisp.read()) if f_indisp else None
-                    import os as _os
-                    _eq_path = "equipos_libranzas.xlsx"
-                    equipos_db = load_equipos_db(open(_eq_path,"rb").read()) if _os.path.exists(_eq_path) else None
 
                     current_week  = pl["current_week"]
                     weeks         = pl["weeks"]
@@ -1341,8 +1294,8 @@ def vista_premisas():
                              for i,d in enumerate(week_dates)]
                     week_start = next((d.date() for d in fixed if d), None)
 
-                    df_nuevas    = process_nuevas(df_src_nuevas, lineas_codes, unit_mw, plant_prefix, equipos_db)
-                    df_viejas    = process_viejas(df_src_viejas, lineas_codes, unit_mw, plant_prefix, equipos_db)
+                    df_nuevas    = process_nuevas(df_src_nuevas, lineas_codes, unit_mw, plant_prefix)
+                    df_viejas    = process_viejas(df_src_viejas, lineas_codes, unit_mw, plant_prefix)
                     df_relevantes= build_relevantes(df_nuevas, df_viejas, lineas,
                                                     rel_ant, week_start)
                     indisp_data  = build_indisponibilidades(
@@ -1360,7 +1313,6 @@ def vista_premisas():
                         "prem_unit_mw":         unit_mw,
                         "prem_plant_prefix":    plant_prefix,
                         "prem_lineas_codes":    lineas_codes,
-                        "prem_equipos_db":      equipos_db,
                         "prem_df_nuevas":       df_nuevas,
                         "prem_df_viejas":       df_viejas,
                         "prem_df_relevantes":   df_relevantes,
@@ -1440,7 +1392,7 @@ def vista_premisas():
         st.info(f"✅ Filtrado automático aplicado — **{len(df)} libranzas** | "
                 f"**{total_r} Relevantes (R)** | **{total_i} Indisponibilidades (I)**")
 
-        buscar = st.text_input("🔍 Buscar", key="prem_search_nuevas", placeholder="Ej: ETESA-615")
+        buscar = st.text_input("🔍 Buscar por número de libranza", key="prem_search_nuevas", placeholder="Ej: ETESA-615-2026")
         if buscar:
             df = df[df["Número"].astype(str).str.contains(buscar, case=False, na=False)]
 
@@ -1463,18 +1415,27 @@ def vista_premisas():
                 "Descripción": st.column_config.TextColumn("Descripción", width="large"),
             }
         )
-        if st.button("💾 Guardar cambios", key="prem_apply_nuevas"):
+        if st.button("💾 Aplicar cambios", key="prem_apply_nuevas"):
+            # Merge edited display cols back into full df
             full = st.session_state.prem_df_nuevas.copy()
-            if buscar:
-                mask = full["Número"].astype(str).str.contains(buscar, case=False, na=False)
-                vals = edited["R/I"].values if "R/I" in edited.columns else []
-                if len(vals) == mask.sum():
-                    full.loc[mask, "R/I"] = vals
-            else:
-                if "R/I" in edited.columns:
-                    full["R/I"] = edited["R/I"].values
+            kept_idx = edited.index.tolist()
+            full = full.iloc[kept_idx].reset_index(drop=True)
+            for col in ["R/I"]:
+                if col in edited.columns:
+                    full[col] = edited[col].values
             st.session_state.prem_df_nuevas = full
-            st.success(f"✅ Guardado — {len(full)} libranzas")
+            # Rebuild relevantes and indisponibilidades
+            st.session_state.prem_df_relevantes = build_relevantes(
+                full, st.session_state.prem_df_viejas, st.session_state.prem_lineas_lookup,
+                st.session_state.get("prem_relevantes_anteriores",[]),
+                st.session_state.get("prem_week_start"))
+            st.session_state.prem_indisp_data = build_indisponibilidades(
+                st.session_state.get("prem_indisp_data", pd.DataFrame())._prev if False else [],
+                st.session_state.prem_df_viejas, full,
+                st.session_state.get("prem_unit_mw",{}),
+                st.session_state.get("prem_plant_prefix",{}), weeks, cw)
+            st.success("Cambios aplicados")
+            st.rerun()
 
     # ── TAB 1: Libranzas Viejas ───────────────────────────────────────
     with tabs[1]:
@@ -1486,7 +1447,7 @@ def vista_premisas():
         st.info(f"✅ Filtrado automático aplicado — **{len(df_v)} libranzas** con estado Aprobado o Recibido | "
                 f"**{n_r_v} Relevantes (R)** | **{n_i_v} Indisponibilidades (I)**")
 
-        buscar_v = st.text_input("🔍 Buscar", key="prem_search_viejas", placeholder="Ej: ETESA-571")
+        buscar_v = st.text_input("🔍 Buscar por número de libranza", key="prem_search_viejas", placeholder="Ej: ETESA-571-2026")
         if buscar_v:
             df_v = df_v[df_v["Número"].astype(str).str.contains(buscar_v, case=False, na=False)]
 
@@ -1507,17 +1468,11 @@ def vista_premisas():
                 "Descripción": st.column_config.TextColumn("Descripción", width="large"),
             }
         )
-        if st.button("💾 Guardar cambios", key="prem_apply_viejas"):
+        if st.button("💾 Aplicar cambios", key="prem_apply_viejas"):
             full_v = st.session_state.prem_df_viejas.copy()
-            if buscar_v:
-                mask_v = full_v["Número"].astype(str).str.contains(buscar_v, case=False, na=False)
-                if "R/I" in edited_v.columns and len(edited_v) == mask_v.sum():
-                    full_v.loc[mask_v, "R/I"] = edited_v["R/I"].values
-            else:
-                if "R/I" in edited_v.columns:
-                    full_v["R/I"] = edited_v["R/I"].values
+            full_v = full_v.iloc[edited_v.index.tolist()].reset_index(drop=True)
             st.session_state.prem_df_viejas = full_v
-            st.success(f"✅ Guardado — {len(full_v)} libranzas")
+            st.success("Cambios aplicados"); st.rerun()
 
     # ── TAB 2: Indisponibilidades ─────────────────────────────────────
     with tabs[2]:
@@ -1530,152 +1485,108 @@ def vista_premisas():
             n_v = (df_id["status"]=="vieja").sum()
             n_n = (df_id["status"]=="nueva").sum()
             total_hp = pd.to_numeric(df_id["Potencia (MW)"], errors="coerce").sum()
-            st.info(f"**{len(df_id)}** — {n_v} anteriores | {n_n} nuevas | Total HP: **{total_hp:.2f} MW**")
-            buscar_id = st.text_input("🔍 Buscar", key="prem_search_indisp",
-                                      placeholder="Ej: CELSIACENT o BAYG3")
-            df_id_f = df_id.copy()
-            if buscar_id:
-                m = df_id_f.apply(lambda r: buscar_id.lower() in
-                    " ".join(str(v) for v in r.values).lower(), axis=1)
-                df_id_f = df_id_f[m]
+            st.info(f"**{len(df_id)}** indisponibilidades — 🔵 {n_v} anteriores | 🟢 {n_n} nuevas | Total HP: **{total_hp:.2f} MW**")
 
-            # Build week dates
-            wd = weeks.get(cw, [None]*7); sab = wd[0]
-            fd = [sab+timedelta(days=i) if (d and sab and abs((d-sab).days)>7) else d
-                  for i,d in enumerate(wd)]
-            grand = 0.0
+            vista_i = st.radio("Vista:", ["✏️ Editar","👁 Vista previa Excel"], horizontal=True, key="prem_vista_indisp")
 
-            for i_d, dia in enumerate(DIAS_SEMANA):
-                dt = fd[i_d] if i_d < len(fd) else None
-                if dt is None: continue
-                dd = dt.date()
-                rows_d = df_id_f[df_id_f.apply(
-                    lambda r: (lambda a,b: bool(a and b and a.date()<=dd<=b.date()))(
-                        parse_dt(r.get("Fecha inicio","")), parse_dt(r.get("Fecha final",""))), axis=1)]
-                if rows_d.empty: continue
-                dtot = pd.to_numeric(rows_d["Potencia (MW)"], errors="coerce").sum()
-                grand += dtot
-                st.markdown(f"**{dia.lower()} {dd.day}** &nbsp;·&nbsp; Total HP: `{dtot:.2f} MW`",
-                            unsafe_allow_html=True)
-
-                # Styled preview (colored like Excel)
-                dcols = [c for c in ["Unidad","Fecha inicio","Hora inicio","Fecha final",
-                                     "Hora final","Potencia (MW)","Libranza","Descripción"]
-                         if c in rows_d.columns]
-                df_styled = rows_d[dcols].reset_index(drop=True)
-                sts = rows_d["status"].tolist() if "status" in rows_d.columns else []
-                def _sty(row, _s=sts):
-                    s = _s[row.name] if row.name < len(_s) else ""
-                    if s == "vieja":
-                        return ["background-color:#BDD7EE" if c=="Libranza" else "" for c in row.index]
-                    return [""]*len(row)
-                try:
-                    st.dataframe(df_styled.style.apply(_sty, axis=1),
-                                 use_container_width=True, hide_index=True)
-                except:
-                    st.dataframe(df_styled, use_container_width=True, hide_index=True)
-
-            st.markdown(f"**INDISPONIBILIDAD TOTAL EN HORAS PUNTA (MW): `{grand:.2f}`**")
-
-            # Editable section
-            with st.expander("✏️ Editar indisponibilidades"):
-                disp_e = [c for c in ["Unidad","Fecha inicio","Hora inicio","Fecha final",
-                                      "Hora final","Potencia (MW)","Libranza","Descripción","status"]
-                          if c in df_id.columns]
-                ed_id = st.data_editor(
-                    df_id[disp_e].reset_index(drop=True),
-                    use_container_width=True, hide_index=True, num_rows="dynamic",
-                    key="prem_editor_indisp",
+            if vista_i == "✏️ Editar":
+                disp_i = ["Unidad","Fecha inicio","Fecha final","Potencia (MW)","Libranza","Descripción","status"]
+                edited_id = st.data_editor(
+                    df_id[[c for c in disp_i if c in df_id.columns]].reset_index(drop=True),
+                    use_container_width=True, hide_index=True,
+                    num_rows="dynamic", key="prem_editor_indisp", height=450,
                     column_config={
-                        "status": st.column_config.SelectboxColumn(
-                            "Estado", options=["vieja","nueva"], width="small"),
-                        "Potencia (MW)": st.column_config.NumberColumn(format="%.2f"),
+                        "status": st.column_config.SelectboxColumn("Estado", options=["vieja","nueva"], width="small"),
+                        "Potencia (MW)": st.column_config.NumberColumn("Potencia (MW)", format="%.2f"),
                     }
                 )
-                if st.button("💾 Guardar", key="prem_apply_indisp"):
-                    st.session_state.prem_indisp_data = ed_id.copy()
-                    st.success("✅ Guardado"); st.rerun()
+                if st.button("💾 Aplicar cambios", key="prem_apply_indisp"):
+                    full_id = st.session_state.prem_indisp_data.copy()
+                    full_id = full_id.iloc[edited_id.index.tolist()].reset_index(drop=True)
+                    for col in ["Potencia (MW)","status"]:
+                        if col in edited_id.columns: full_id[col] = edited_id[col].values
+                    st.session_state.prem_indisp_data = full_id
+                    st.success("Cambios aplicados"); st.rerun()
+            else:
+                # Preview grouped by day
+                week_dates = weeks.get(cw, [None]*7)
+                sab = week_dates[0]
+                fixed_dates = [sab + timedelta(days=i) if (d and sab and abs((d-sab).days)>7) else d for i,d in enumerate(week_dates)]
+                for i, dia in enumerate(DIAS_SEMANA):
+                    dt = fixed_dates[i] if i < len(fixed_dates) else None
+                    if dt is None: continue
+                    day_date = dt.date()
+                    day_rows = []
+                    for _, r in df_id.iterrows():
+                        fi = parse_dt(r.get("Fecha inicio",""))
+                        ff = parse_dt(r.get("Fecha final",""))
+                        if fi and ff and fi.date() <= day_date <= ff.date():
+                            day_rows.append(r)
+                    if not day_rows: continue
+                    day_rows = sorted(day_rows, key=lambda r: (0 if str(r.get("status",""))=="vieja" else 1, parse_dt(r.get("Fecha inicio","")) or datetime.max))
+                    day_total = sum(float(r.get("Potencia (MW)",0) or 0) for r in day_rows)
+                    st.markdown(f"**{dia.lower()} {day_date.day}** — Total HP: `{day_total:.2f} MW`")
+                    df_day = pd.DataFrame(day_rows)[["Unidad","Fecha inicio","Fecha final","Potencia (MW)","Libranza","Descripción"]]
 
-            # Editable section
-            with st.expander("✏️ Editar indisponibilidades"):
-                disp_e = [c for c in ["Unidad","Fecha inicio","Hora inicio","Fecha final",
-                                      "Hora final","Potencia (MW)","Libranza","Descripción","status"]
-                          if c in df_id.columns]
-                ed_id = st.data_editor(
-                    df_id[disp_e].reset_index(drop=True),
-                    use_container_width=True, hide_index=True, num_rows="dynamic",
-                    key="prem_editor_indisp",
-                    column_config={
-                        "status": st.column_config.SelectboxColumn(
-                            "Estado", options=["vieja","nueva"], width="small"),
-                        "Potencia (MW)": st.column_config.NumberColumn(format="%.2f"),
-                    }
-                )
-                if st.button("💾 Guardar", key="prem_apply_indisp"):
-                    st.session_state.prem_indisp_data = ed_id.copy()
-                    st.success("✅ Guardado"); st.rerun()
+                    def style_indisp_row(row):
+                        idx = row.name
+                        status = day_rows[idx].get("status","") if idx < len(day_rows) else ""
+                        if status == "vieja":
+                            return ["","","","","background-color:#BDD7EE;font-weight:bold",""]
+                        return [""]*6
+
+                    try:
+                        styled = df_day.reset_index(drop=True).style.apply(style_indisp_row, axis=1)
+                        st.dataframe(styled, use_container_width=True, hide_index=True)
+                    except:
+                        st.dataframe(df_day.reset_index(drop=True), use_container_width=True, hide_index=True)
 
     # ── TAB 3: Libranzas Relevantes ───────────────────────────────────
     with tabs[3]:
         st.subheader(f"Libranzas Relevantes — Semana {cw}")
-        df_rel = (st.session_state.prem_df_relevantes.copy()
-                  if st.session_state.prem_df_relevantes is not None
-                  else pd.DataFrame(columns=PLANTILLA_REL_COLS))
+        df_rel = st.session_state.prem_df_relevantes.copy() if st.session_state.prem_df_relevantes is not None else pd.DataFrame(columns=PLANTILLA_REL_COLS)
         if df_rel.empty:
             st.info("No hay libranzas clasificadas como R.")
         else:
-            st.info(f"**{len(df_rel)} relevantes**")
-            buscar_r = st.text_input("🔍 Buscar", key="prem_search_rel",
-                                     placeholder="Ej: ETESA-688 o 230-4A")
-            disp_r = [c for c in ["Tipo","Fecha inicio","Fecha final","Tipo de Equipos",
-                                   "Equipo","Subestación","Libranza","Descripción del trabajo","Estado"]
-                      if c in df_rel.columns]
-            df_rs = df_rel[disp_r].copy() if disp_r else df_rel.copy()
-            sts_r = df_rel["_status"].tolist() if "_status" in df_rel.columns else [""] * len(df_rel)
+            vista_r = st.radio("Vista:", ["✏️ Editar","👁 Vista previa Excel"], horizontal=True, key="prem_vista_rel")
+            disp_r = ["Tipo","Fecha inicio","Fecha final","Tipo de Equipos","Equipo","Subestación","Libranza","Descripción del trabajo","Estado"]
+            cols_ok = [c for c in disp_r if c in df_rel.columns]
 
-            if buscar_r:
-                mask_r = df_rs.apply(lambda row: buscar_r.lower() in
-                    " ".join(str(v) for v in row.values).lower(), axis=1)
-                df_rs = df_rs[mask_r]
-                sts_r = [sts_r[i] for i in df_rs.index]
+            if vista_r == "✏️ Editar":
+                edited_r = st.data_editor(
+                    df_rel[cols_ok].reset_index(drop=True),
+                    use_container_width=True, hide_index=True,
+                    num_rows="dynamic", key="prem_editor_rel", height=450
+                )
+                if st.button("💾 Aplicar cambios", key="prem_apply_rel"):
+                    st.session_state.prem_df_relevantes = edited_r.reset_index(drop=True)
+                    st.success("Cambios aplicados"); st.rerun()
+            else:
+                # Styled preview
+                df_prev = df_rel[cols_ok].reset_index(drop=True)
+                statuses = df_rel["_status"].values if "_status" in df_rel.columns else [""] * len(df_rel)
 
-            st.caption(f"{len(df_rs)} relevantes · Azul=vieja · Verde=Continua · Rosa=Repetitiva")
+                def style_rel(row):
+                    idx = row.name
+                    status = statuses[idx] if idx < len(statuses) else ""
+                    tipo = str(row.get("Tipo","")).strip().lower() if "Tipo" in row.index else ""
+                    styles = []
+                    for col in row.index:
+                        if col == "Tipo":
+                            if "continua" in tipo: styles.append("background-color:#C6EFCE")
+                            elif "repetitiva" in tipo: styles.append("background-color:#FFB6C1")
+                            else: styles.append("")
+                        elif col == "Libranza" and status == "vieja":
+                            styles.append("background-color:#BDD7EE;font-weight:bold")
+                        else:
+                            styles.append("")
+                    return styles
 
-            # Styled preview (colored like Excel)
-            df_rs_reset = df_rs.reset_index(drop=True)
-            def _srel(row, _s=sts_r):
-                idx = row.name
-                st_ = _s[idx] if idx < len(_s) else ""
-                tipo = str(row.get("Tipo","")).lower() if "Tipo" in row.index else ""
-                res = []
-                for col in row.index:
-                    if col == "Tipo":
-                        res.append("background-color:#C6EFCE" if "continua" in tipo
-                                   else "background-color:#FFB6C1" if "repetitiva" in tipo else "")
-                    elif col == "Libranza" and st_ == "vieja":
-                        res.append("background-color:#BDD7EE;font-weight:bold")
-                    else:
-                        res.append("")
-                return res
-            try:
-                st.dataframe(df_rs_reset.style.apply(_srel, axis=1),
-                             use_container_width=True, hide_index=True, height=400)
-            except:
-                st.dataframe(df_rs_reset, use_container_width=True, hide_index=True, height=400)
-
-            # Editable section
-            with st.expander("✏️ Editar relevantes"):
-                df_rel_all = df_rel[disp_r].reset_index(drop=True) if disp_r else df_rel.reset_index(drop=True)
-                ed_r = st.data_editor(df_rel_all, use_container_width=True,
-                                      hide_index=True, num_rows="dynamic",
-                                      key="prem_editor_rel", height=400)
-                if st.button("💾 Guardar", key="prem_apply_rel"):
-                    full_rel = st.session_state.prem_df_relevantes.copy()
-                    for col in disp_r:
-                        if col in ed_r.columns:
-                            full_rel[col] = ed_r[col].values
-                    st.session_state.prem_df_relevantes = full_rel.reset_index(drop=True)
-                    st.success("✅ Guardado"); st.rerun()
+                try:
+                    styled = df_prev.style.apply(style_rel, axis=1)
+                    st.dataframe(styled, use_container_width=True, hide_index=True, height=450)
+                except:
+                    st.dataframe(df_prev, use_container_width=True, hide_index=True, height=450)
 
     # ── TAB 4: Proyectos de Generación ───────────────────────────────
     with tabs[4]:
