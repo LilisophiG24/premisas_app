@@ -1596,25 +1596,6 @@ def vista_premisas():
                     st.session_state.prem_indisp_data = ed_id.copy()
                     st.success("✅ Guardado"); st.rerun()
 
-            # Editable section
-            with st.expander("✏️ Editar indisponibilidades"):
-                disp_e = [c for c in ["Unidad","Fecha inicio","Hora inicio","Fecha final",
-                                      "Hora final","Potencia (MW)","Libranza","Descripción","status"]
-                          if c in df_id.columns]
-                ed_id = st.data_editor(
-                    df_id[disp_e].reset_index(drop=True),
-                    use_container_width=True, hide_index=True, num_rows="dynamic",
-                    key="prem_editor_indisp",
-                    column_config={
-                        "status": st.column_config.SelectboxColumn(
-                            "Estado", options=["vieja","nueva"], width="small"),
-                        "Potencia (MW)": st.column_config.NumberColumn(format="%.2f"),
-                    }
-                )
-                if st.button("💾 Guardar", key="prem_apply_indisp"):
-                    st.session_state.prem_indisp_data = ed_id.copy()
-                    st.success("✅ Guardado"); st.rerun()
-
     # ── TAB 3: Libranzas Relevantes ───────────────────────────────────
     with tabs[3]:
         st.subheader(f"Libranzas Relevantes — Semana {cw}")
