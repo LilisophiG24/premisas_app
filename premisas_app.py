@@ -278,33 +278,41 @@ def classify_libranza(row, lineas_codes=None, unit_mw=None, plant_prefix=None, e
     is_i   = False
     is_r   = False
 
-    # ── Exclude "libranza informativa" → never R ───────────────
+    # ── Hard excludes — never R or I ───────────────────────────
     if "libranza informativa" in desc or "lib. informativa" in desc:
-        is_r = False
+        return ""
     is_distrib = any(numero.startswith(a) for a in DISTRIBUTION_AGENTS)
     if is_distrib and any(k in desc or k in eq_up.lower() for k in DISTRIBUTION_KW):
         return ""
+    # SCADA/fibra/comunicaciones → never R regardless of agent or equipos_db
+    if any(k in desc for k in SCADA_KW):
+        return ""
 
-    # ── I: non-ETESA, non-SCADA ────────────────────────────────
+    # ── I: non-ETESA ───────────────────────────────────────────
     if not numero.startswith("ETESA-"):
-        if not any(k in desc for k in SCADA_KW):
-            is_i = True
+        is_i = True
 
     # ── R: ETESA equipment checked against Lineas sheet ────────
     if numero.startswith("ETESA-"):
-        if lineas_codes:
-            codes = extract_equip_codes(eq)
-            # Exclude auxiliary generators from R
-            codes -= {"GENERADOR AUXILIAR", "GEN AUX", "GENERADOR AUX"}
-            if codes & lineas_codes:
+        # GENERADOR AUXILIAR alone → never R for ETESA
+        eq_codes_etesa = extract_equip_codes(eq)
+        eq_codes_etesa -= {"GENERADOR AUXILIAR", "GEN AUX", "GENERADOR AUX"}
+        only_genaux = not eq_codes_etesa and "GENERADOR AUXILIAR" in eq_up
+        if not only_genaux:
+            if lineas_codes and eq_codes_etesa & lineas_codes:
                 is_r = True
-        if not is_r:
-            if R_LINE_RE.search(eq_up): is_r = True
-            if "BANCO DE CAPACITORES" in eq_up: is_r = True
-            if "STATCOM" in eq_up or "SPEAR" in eq_up: is_r = True
-            for t in R_EQUIP_TYPES:
-                if t in eq_up and R_VOLT_RE.search(eq_up):
-                    is_r = True; break
+            if not is_r:
+                if R_LINE_RE.search(eq_up): is_r = True
+            if not is_r and "BANCO DE CAPACITORES" in eq_up: is_r = True
+            # STATCOM/SPEAR only if NOT inside a GENERADOR AUXILIAR name
+            if not is_r:
+                if ("STATCOM" in eq_up and "GENAUX" not in eq_up
+                        and "GENERADOR AUXILIAR" not in eq_up): is_r = True
+                if "SPEAR" in eq_up: is_r = True
+            if not is_r:
+                for t in R_EQUIP_TYPES:
+                    if t in eq_up and R_VOLT_RE.search(eq_up):
+                        is_r = True; break
 
     # ── R: Special large plants → always R+I ───────────────────
     if is_i and not is_r:
@@ -315,13 +323,16 @@ def classify_libranza(row, lineas_codes=None, unit_mw=None, plant_prefix=None, e
                 if any(sp in pname or pname in sp for sp in SPECIAL_PLANTS):
                     is_r = True; break
 
-    # ── R: equipos_db — any equipment owned/shared by ETESA ────
+    # ── R: equipos_db — equipment owned/shared by ETESA ────────
+    # Only applies if not GENERADOR AUXILIAR only
     if not is_r and equipos_db:
         _, etesa_codes_db, etesa_locs_db = equipos_db
-        eq_codes = extract_equip_codes(eq)
-        if eq_codes & etesa_codes_db:
+        eq_codes_db = extract_equip_codes(eq)
+        # Remove GENERADOR AUXILIAR codes from check
+        eq_codes_db -= {"GENERADOR AUXILIAR", "GEN AUX", "GENERADOR AUX"}
+        if eq_codes_db and eq_codes_db & etesa_codes_db:
             is_r = True
-        if not is_r:
+        if not is_r and eq_codes_db:
             for loc in etesa_locs_db:
                 if loc and len(loc) > 3 and loc in eq_up:
                     is_r = True; break
@@ -1565,6 +1576,25 @@ def vista_premisas():
                     st.dataframe(df_styled, use_container_width=True, hide_index=True)
 
             st.markdown(f"**INDISPONIBILIDAD TOTAL EN HORAS PUNTA (MW): `{grand:.2f}`**")
+
+            # Editable section
+            with st.expander("✏️ Editar indisponibilidades"):
+                disp_e = [c for c in ["Unidad","Fecha inicio","Hora inicio","Fecha final",
+                                      "Hora final","Potencia (MW)","Libranza","Descripción","status"]
+                          if c in df_id.columns]
+                ed_id = st.data_editor(
+                    df_id[disp_e].reset_index(drop=True),
+                    use_container_width=True, hide_index=True, num_rows="dynamic",
+                    key="prem_editor_indisp",
+                    column_config={
+                        "status": st.column_config.SelectboxColumn(
+                            "Estado", options=["vieja","nueva"], width="small"),
+                        "Potencia (MW)": st.column_config.NumberColumn(format="%.2f"),
+                    }
+                )
+                if st.button("💾 Guardar", key="prem_apply_indisp"):
+                    st.session_state.prem_indisp_data = ed_id.copy()
+                    st.success("✅ Guardado"); st.rerun()
 
             # Editable section
             with st.expander("✏️ Editar indisponibilidades"):
