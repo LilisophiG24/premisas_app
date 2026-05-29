@@ -1296,7 +1296,7 @@ def vista_premisas():
         f_nuevas    = st.file_uploader("2. libranzas_nuevas.xlsx",     type="xlsx", key="prem_up_nuevas")
         f_viejas    = st.file_uploader("3. libranzas_viejas.xlsx",     type="xlsx", key="prem_up_viejas")
         f_indisp    = st.file_uploader("4. Indisponibilidades (opcional)", type="xlsx", key="prem_up_indisp")
-        f_equipos   = st.file_uploader("5. equipos_libranzas.xlsx (opcional)", type="xlsx", key="prem_up_equipos")
+        # equipos_libranzas.xlsx loaded automatically from repo
 
         st.divider()
         btn_process = st.button("⚙️ Procesar", type="primary", use_container_width=True,
@@ -1310,7 +1310,9 @@ def vista_premisas():
                     df_src_nuevas = load_source_libranzas(f_nuevas.read())
                     df_src_viejas = load_source_libranzas(f_viejas.read())
                     indisp_file_df = load_indisp_file(f_indisp.read()) if f_indisp else None
-                    equipos_db    = load_equipos_db(f_equipos.read()) if f_equipos else None
+                    import os as _os
+                    _eq_path = "equipos_libranzas.xlsx"
+                    equipos_db = load_equipos_db(open(_eq_path,"rb").read()) if _os.path.exists(_eq_path) else None
 
                     current_week  = pl["current_week"]
                     weeks         = pl["weeks"]
@@ -1427,7 +1429,9 @@ def vista_premisas():
         st.info(f"✅ Filtrado automático aplicado — **{len(df)} libranzas** | "
                 f"**{total_r} Relevantes (R)** | **{total_i} Indisponibilidades (I)**")
 
-        buscar = st.text_input("🔍 Buscar por número de libranza", key="prem_search_nuevas", placeholder="Ej: ETESA-615-2026")
+        st.text_input("🔍 Buscar", key="prem_search_nuevas", placeholder="Ej: ETESA-615",
+            on_change=lambda: st.session_state.update({"prem_s_nuevas": st.session_state.get("prem_search_nuevas","")}))
+        buscar = st.session_state.get("prem_s_nuevas","")
         if buscar:
             df = df[df["Número"].astype(str).str.contains(buscar, case=False, na=False)]
 
@@ -1473,7 +1477,9 @@ def vista_premisas():
         st.info(f"✅ Filtrado automático aplicado — **{len(df_v)} libranzas** con estado Aprobado o Recibido | "
                 f"**{n_r_v} Relevantes (R)** | **{n_i_v} Indisponibilidades (I)**")
 
-        buscar_v = st.text_input("🔍 Buscar por número de libranza", key="prem_search_viejas", placeholder="Ej: ETESA-571-2026")
+        st.text_input("🔍 Buscar", key="prem_search_viejas", placeholder="Ej: ETESA-571",
+            on_change=lambda: st.session_state.update({"prem_s_viejas": st.session_state.get("prem_search_viejas","")}))
+        buscar_v = st.session_state.get("prem_s_viejas","")
         if buscar_v:
             df_v = df_v[df_v["Número"].astype(str).str.contains(buscar_v, case=False, na=False)]
 
@@ -1518,57 +1524,59 @@ def vista_premisas():
             n_n = (df_id["status"]=="nueva").sum()
             total_hp = pd.to_numeric(df_id["Potencia (MW)"], errors="coerce").sum()
             st.info(f"**{len(df_id)}** — 🔵 {n_v} anteriores | 🟢 {n_n} nuevas | Total HP: **{total_hp:.2f} MW**")
-
-            buscar_id = st.text_input("🔍 Buscar", key="prem_search_indisp",
-                                      placeholder="Ej: CELSIACENT o BAYG3")
-            df_id_show = df_id.copy()
+            st.text_input("🔍 Buscar", key="prem_search_indisp",
+                placeholder="Ej: CELSIACENT o BAYG3",
+                on_change=lambda: st.session_state.update(
+                    {"prem_s_indisp": st.session_state.get("prem_search_indisp","")}))
+            buscar_id = st.session_state.get("prem_s_indisp","")
             if buscar_id:
-                mask_id = df_id_show.apply(
+                mask_id = df_id.apply(
                     lambda r: buscar_id.lower() in " ".join(str(v) for v in r.values).lower(), axis=1)
-                df_id_show = df_id_show[mask_id]
-
-            # Add emoji indicator to status for visual reference
-            df_id_edit = df_id_show.copy()
-            disp_i = [c for c in ["Unidad","Fecha inicio","Fecha final","Potencia (MW)",
-                                   "Libranza","Descripción","status"] if c in df_id_edit.columns]
-            st.caption(f"{len(df_id_show)} indisponibilidades · 🔵=anterior (azul en Excel) · 🟢=nueva")
-
-            edited_id = st.data_editor(
-                df_id_edit[disp_i].reset_index(drop=True),
-                use_container_width=True, hide_index=True, num_rows="dynamic",
-                key="prem_editor_indisp", height=500,
-                column_config={
-                    "status": st.column_config.SelectboxColumn(
-                        "🔵/🟢 Estado", options=["vieja","nueva"], width="small"),
-                    "Potencia (MW)": st.column_config.NumberColumn("Potencia (MW)", format="%.2f"),
-                    "Libranza": st.column_config.TextColumn("Libranza 🔵=anterior"),
-                    "Unidad": st.column_config.TextColumn("Unidad"),
-                    "Descripción": st.column_config.TextColumn("Descripción", width="large"),
-                }
-            )
+                df_id = df_id[mask_id]
+            week_dates_p = weeks.get(cw, [None]*7)
+            sab_p = week_dates_p[0]
+            fixed_p = [sab_p + timedelta(days=i) if (d and sab_p and abs((d-sab_p).days)>7) else d
+                       for i,d in enumerate(week_dates_p)]
+            all_edits = {}
+            grand_total = 0.0
+            for i_d, dia in enumerate(DIAS_SEMANA):
+                dt = fixed_p[i_d] if i_d < len(fixed_p) else None
+                if dt is None: continue
+                day_date = dt.date()
+                day_rows = df_id[df_id.apply(
+                    lambda r: (lambda fi,ff: bool(fi and ff and fi.date()<=day_date<=ff.date()))(
+                        parse_dt(r.get("Fecha inicio","")), parse_dt(r.get("Fecha final",""))), axis=1)]
+                if day_rows.empty: continue
+                day_total = pd.to_numeric(day_rows["Potencia (MW)"], errors="coerce").sum()
+                grand_total += day_total
+                st.markdown(f"**{dia.lower()} {day_date.day}** · Total HP: `{day_total:.2f} MW`")
+                disp_day = [c for c in ["Unidad","Fecha inicio","Hora inicio","Fecha final",
+                                        "Hora final","Potencia (MW)","Libranza","Descripción","status"]
+                            if c in day_rows.columns]
+                day_edit = st.data_editor(
+                    day_rows[disp_day].reset_index(drop=True),
+                    use_container_width=True, hide_index=True, num_rows="dynamic",
+                    key=f"prem_indisp_day_{dia}",
+                    column_config={
+                        "status": st.column_config.SelectboxColumn(
+                            "🔵/🟢", options=["vieja","nueva"], width="small"),
+                        "Potencia (MW)": st.column_config.NumberColumn("Potencia (MW)", format="%.2f"),
+                        "Libranza": st.column_config.TextColumn("Libranza"),
+                    }
+                )
+                all_edits[dia] = (day_rows.index, day_edit)
+            total_label = f"INDISPONIBILIDAD TOTAL EN HORAS PUNTA (MW): {grand_total:.2f}"
+            st.markdown(f"**{total_label}**")
             if st.button("💾 Guardar cambios", key="prem_apply_indisp"):
                 full_id = st.session_state.prem_indisp_data.copy()
-                if buscar_id:
-                    mask = full_id.apply(
-                        lambda r: buscar_id.lower() in " ".join(str(v) for v in r.values).lower(), axis=1)
+                for _dia, (orig_idx, edited_k) in all_edits.items():
                     for col in ["Potencia (MW)","status","Descripción"]:
-                        if col in edited_id.columns and len(edited_id) == mask.sum():
-                            full_id.loc[mask, col] = edited_id[col].values
-                else:
-                    for col in ["Potencia (MW)","status","Descripción"]:
-                        if col in edited_id.columns:
-                            full_id[col] = edited_id[col].values
-                    # Handle added/deleted rows
-                    if len(edited_id) != len(full_id):
-                        full_id = edited_id.copy()
-                        if "status" not in full_id.columns:
-                            full_id["status"] = "nueva"
-                        for col in [c for c in full_id.columns if c not in edited_id.columns]:
-                            full_id[col] = ""
-                st.session_state.prem_indisp_data = full_id.reset_index(drop=True)
+                        if col in edited_k.columns and len(edited_k) == len(orig_idx):
+                            full_id.loc[orig_idx, col] = edited_k[col].values
+                st.session_state.prem_indisp_data = full_id
                 st.success("✅ Guardado")
 
-    # ── TAB 3: Libranzas Relevantes ───────────────────────────────────
+    # ── TAB 3: Libranzas Relevantes ─────────────────────────────────────────────
     with tabs[3]:
         st.subheader(f"Libranzas Relevantes — Semana {cw}")
         df_rel = (st.session_state.prem_df_relevantes.copy()
@@ -1577,50 +1585,53 @@ def vista_premisas():
         if df_rel.empty:
             st.info("No hay libranzas clasificadas como R.")
         else:
-            st.info(f"**{len(df_rel)} relevantes** · 🔵=vieja (azul en Excel) · "
-                    f"🟩=Continua · 🟥=Repetitiva")
-            buscar_r = st.text_input("🔍 Buscar", key="prem_search_rel",
-                                     placeholder="Ej: ETESA-688 o 230-4A")
+            st.info(f"**{len(df_rel)} relevantes** · 🟩=Continua · 🟥=Repetitiva · 🔵=vieja")
+            st.text_input("🔍 Buscar", key="prem_search_rel",
+                placeholder="Ej: ETESA-688 o 230-4A",
+                on_change=lambda: st.session_state.update(
+                    {"prem_s_rel": st.session_state.get("prem_search_rel","")}))
+            buscar_r = st.session_state.get("prem_s_rel","")
+            df_rel_view = df_rel.copy()
+            def _tipo_emoji(t):
+                t2 = str(t).lower()
+                return ("🟩 " if "continua" in t2 else "🟥 " if "repetitiva" in t2 else "") + str(t).strip()
+            if "Tipo" in df_rel_view.columns:
+                df_rel_view["Tipo"] = df_rel_view["Tipo"].apply(_tipo_emoji)
+            if "_status" in df_rel_view.columns and "Libranza" in df_rel_view.columns:
+                df_rel_view["Libranza"] = df_rel_view.apply(
+                    lambda r: ("🔵 " if r.get("_status","")=="vieja" else "") + str(r.get("Libranza","")), axis=1)
             disp_r = [c for c in ["Tipo","Fecha inicio","Fecha final","Tipo de Equipos",
-                                   "Equipo","Subestación","Libranza","Descripción del trabajo",
-                                   "Estado","_status"] if c in df_rel.columns]
-            df_rel_show = df_rel[disp_r].copy()
+                                   "Equipo","Suestación","Libranza","Descripción del trabajo","Estado"]
+                      if c in df_rel_view.columns]
+            # Fallback if accented cols not found
+            if not disp_r:
+                disp_r = [c for c in df_rel_view.columns if c not in ["_status","_sort_dt"]]
+            df_r_show = df_rel_view[disp_r]
             if buscar_r:
-                mask_r = df_rel_show.apply(
+                mask_r = df_r_show.apply(
                     lambda row: buscar_r.lower() in " ".join(str(v) for v in row.values).lower(), axis=1)
-                df_rel_show = df_rel_show[mask_r]
-            st.caption(f"{len(df_rel_show)} relevantes · Tipo: 🟩 Continua · 🟥 Repetitiva · "
-                       f"Libranza: 🔵 vieja de semana anterior")
-
+                df_r_show = df_r_show[mask_r]
+            st.caption(f"{len(df_r_show)} relevantes")
             edited_r = st.data_editor(
-                df_rel_show.reset_index(drop=True),
+                df_r_show.reset_index(drop=True),
                 use_container_width=True, hide_index=True, num_rows="dynamic",
                 key="prem_editor_rel", height=500,
                 column_config={
-                    "Tipo": st.column_config.SelectboxColumn(
-                        "🟩/🟥 Tipo", options=["Continua","Repetitiva",""], width="small"),
-                    "_status": st.column_config.SelectboxColumn(
-                        "🔵 Estado", options=["vieja","nueva",""], width="small"),
-                    "Libranza": st.column_config.TextColumn("Libranza"),
+                    "Tipo": st.column_config.TextColumn("🟩/🟥 Tipo"),
+                    "Libranza": st.column_config.TextColumn("Libranza 🔵=ant."),
                     "Equipo": st.column_config.TextColumn("Equipo", width="large"),
-                    "Descripción del trabajo": st.column_config.TextColumn(
-                        "Descripción del trabajo", width="large"),
                 }
             )
             if st.button("💾 Guardar cambios", key="prem_apply_rel"):
+                def _strip_e(v):
+                    for e in ["🟩 ","🟥 ","🔵 "]: v = str(v).replace(e,"")
+                    return v.strip()
                 full_rel = st.session_state.prem_df_relevantes.copy()
-                editable_cols_r = [c for c in disp_r if c in edited_r.columns]
-                if buscar_r:
-                    mask_full = full_rel[disp_r].apply(
-                        lambda row: buscar_r.lower() in " ".join(str(v) for v in row.values).lower(), axis=1)
-                    for col in editable_cols_r:
-                        if len(edited_r) == mask_full.sum():
-                            full_rel.loc[mask_full, col] = edited_r[col].values
-                else:
-                    for col in editable_cols_r:
-                        full_rel[col] = edited_r[col].values
-                    if len(edited_r) != len(full_rel):
-                        full_rel = edited_r.copy()
+                target_idx = df_rel.index[df_rel_view[disp_r].apply(
+                    lambda row: buscar_r.lower() in " ".join(str(v) for v in row.values).lower(), axis=1)] if buscar_r else full_rel.index
+                for col in disp_r:
+                    if col in edited_r.columns and len(edited_r) == len(target_idx):
+                        full_rel.loc[target_idx, col] = [_strip_e(v) for v in edited_r[col].values]
                 st.session_state.prem_df_relevantes = full_rel.reset_index(drop=True)
                 st.success("✅ Guardado")
 
