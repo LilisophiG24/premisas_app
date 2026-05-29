@@ -158,23 +158,7 @@ def load_potencias_db(file_bytes):
         return db
     except: return {}
 
-@st.cache_data(show_spinner=False)
-def load_potencias_db(file_bytes):
-    """Load potencias_unidades.xlsx → {unit_code_upper: potencia_mw}"""
-    try:
-        wb = load_workbook(BytesIO(file_bytes), data_only=True)
-        ws = wb.active
-        db = {}
-        for row in ws.iter_rows(min_row=1, values_only=True):
-            code = str(row[0] or "").strip()
-            mw   = row[1]
-            if not code or "total" in code.lower(): continue
-            try: db[code.upper()] = float(mw)
-            except: pass
-        return db
-    except: return {}
 
-@st.cache_data(show_spinner=False)
 def load_equipos_db(file_bytes):
     """Load equipos_libranzas.xlsx → (db, etesa_codes, etesa_locs)."""
     try:
@@ -910,7 +894,7 @@ def build_relevantes(df_nuevas, df_viejas, lineas_lookup, relevantes_anteriores=
 
 def build_indisponibilidades(indisp_existing, df_viejas, df_nuevas,
                              unit_mw, plant_prefix, weeks, current_week,
-                             indisp_file_df=None):
+                             indisp_file_df=None, potencias_db=None):
     """Build flat indisponibilidades DataFrame.
     Priority: external file > plantilla existing > nuevas-I
     status: 'vieja' (blue) | 'nueva' (white)
@@ -978,6 +962,16 @@ def build_indisponibilidades(indisp_existing, df_viejas, df_nuevas,
                 "Libranza": num, "Descripción": str(row.get("Descripción","")),
                 "status": "nueva"
             })
+
+    # Fill in 0-potencia units from potencias_db
+    if potencias_db:
+        for r in result:
+            if float(r.get("Potencia (MW)", 0) or 0) == 0:
+                unit = str(r.get("Unidad", "")).strip().upper()
+                # Sum potencia for all unit codes (handles "BONG1 BONG2 BONG3")
+                total_mw_db = sum(potencias_db.get(ucode, 0.0) for ucode in unit.split() if ucode)
+                if total_mw_db > 0:
+                    r["Potencia (MW)"] = total_mw_db
 
     if not result: return pd.DataFrame(columns=INDISP_COLS + ["status"])
     df = pd.DataFrame(result)
@@ -1385,7 +1379,7 @@ def vista_premisas():
                     indisp_data  = build_indisponibilidades(
                                         indisp_exist, df_viejas, df_nuevas,
                                         unit_mw, plant_prefix, weeks, current_week,
-                                        indisp_file_df)
+                                        indisp_file_df, potencias_db)
                     df_proyectos = update_proyectos(pl["proyectos"], current_week, weeks)
                     df_proyectos = detect_proyectos_from_libranzas(df_viejas, df_nuevas, df_proyectos)
 
