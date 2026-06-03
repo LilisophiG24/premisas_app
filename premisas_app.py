@@ -143,6 +143,29 @@ SPECIAL_PLANTS = {
 }
 
 
+def _actualizar_premisa(df_viejas_nuevas):
+    """Cross current relevantes against updated viejas to find vencidas."""
+    if st.session_state.get("prem_df_relevantes") is None: return 0
+    ESTADOS_VENCIDOS = {"cancelada", "ejecutada"}
+    # Build dict: libranza_num → ultimo_estado from new viejas file
+    estado_dict = {}
+    if df_viejas_nuevas is not None and not df_viejas_nuevas.empty:
+        for _, row in df_viejas_nuevas.iterrows():
+            num    = str(row.get("Número","")).strip()
+            estado = str(row.get("Último Estado","")).strip().lower()
+            if num: estado_dict[num] = estado
+    # Find vencidas in current relevantes
+    df_rel = st.session_state.prem_df_relevantes
+    vencidas = set()
+    for _, row in df_rel.iterrows():
+        lib = str(row.get("Libranza","")).strip()
+        if lib in estado_dict and estado_dict[lib] in ESTADOS_VENCIDOS:
+            vencidas.add(lib)
+    _push_history()
+    st.session_state["prem_vencidas"] = vencidas
+    return len(vencidas)
+
+
 # ── Auto-save / History helpers ──────────────────────────────────────────────
 def _df_hash(df):
     """Fast hash of a DataFrame for change detection."""
@@ -179,6 +202,9 @@ def _auto_save(key, new_df):
     if _df_hash(new_df) != _df_hash(old_df):
         _push_history()
         st.session_state[key] = new_df.copy()
+        from datetime import datetime
+        st.session_state["prem_last_save"] = datetime.now().strftime("%H:%M:%S")
+        st.session_state["prem_save_count"] = st.session_state.get("prem_save_count", 0) + 1
 
 def _undo():
     """Pop last snapshot and restore state."""
@@ -1424,6 +1450,28 @@ def vista_premisas():
         f_viejas    = st.file_uploader("3. libranzas_viejas.xlsx",     type="xlsx", key="prem_up_viejas")
         f_indisp    = st.file_uploader("4. Indisponibilidades (opcional)", type="xlsx", key="prem_up_indisp")
         # equipos_libranzas.xlsx loaded automatically from repo
+        st.divider()
+        st.markdown("**🔄 Actualizar Premisa existente**")
+        st.caption("Usa sesión guardada + nuevas libranzas para detectar vencidas")
+        btn_actualizar = st.button("🔄 Actualizar Premisa",
+            use_container_width=True, key="prem_btn_actualizar",
+            disabled=(st.session_state.get("prem_df_relevantes") is None or not f_viejas))
+        if btn_actualizar and f_viejas:
+            with st.spinner("Cruzando relevantes con libranzas..."):
+                try:
+                    _lc  = st.session_state.get("prem_lineas_codes", set())
+                    _um  = st.session_state.get("prem_unit_mw", {})
+                    _pp  = st.session_state.get("prem_plant_prefix", {})
+                    _edb = st.session_state.get("prem_equipos_db")
+                    df_v_new = process_viejas(load_source_libranzas(f_viejas.read()), _lc, _um, _pp, _edb)
+                    n = _actualizar_premisa(df_v_new)
+                    if n > 0:
+                        st.warning(f"⚠️ {n} relevante(s) vencida(s) — ve a la pestaña Relevantes")
+                    else:
+                        st.success("✅ Sin cambios — no hay vencidas")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error: {e}")
 
         st.divider()
         btn_process = st.button("⚙️ Procesar", type="primary", use_container_width=True,
@@ -1745,7 +1793,32 @@ def vista_premisas():
         if df_rel.empty:
             st.info("No hay libranzas clasificadas como R.")
         else:
-            st.info(f"**{len(df_rel)} relevantes**")
+            vencidas = st.session_state.get("prem_vencidas", set())
+            n_venc = len([r for _,r in df_rel.iterrows()
+                          if str(r.get("Libranza","")) in vencidas])
+            if n_venc > 0:
+                st.warning(f"⚠️ **{n_venc} relevante(s) vencida(s)** (Cancelada/Ejecutada) — se muestran en rojo")
+                col_d1, col_d2 = st.columns(2)
+                if col_d1.button("🗑 Borrar seleccionadas", key="prem_del_sel",
+                                  use_container_width=True):
+                    sel = st.session_state.get("prem_rel_sel", set())
+                    if sel:
+                        _push_history()
+                        st.session_state.prem_df_relevantes = df_rel[
+                            ~df_rel["Libranza"].isin(sel)].reset_index(drop=True)
+                        st.session_state["prem_vencidas"] = vencidas - sel
+                        st.session_state["prem_rel_sel"] = set()
+                        st.rerun()
+                if col_d2.button("🗑 Borrar todas vencidas", key="prem_del_all",
+                                  use_container_width=True, type="primary"):
+                    _push_history()
+                    st.session_state.prem_df_relevantes = df_rel[
+                        ~df_rel["Libranza"].isin(vencidas)].reset_index(drop=True)
+                    st.session_state["prem_vencidas"] = set()
+                    st.rerun()
+            else:
+                st.info(f"**{len(df_rel)} relevantes**")
+
             buscar_r = st.text_input("🔍 Buscar", key="prem_search_rel",
                                      placeholder="Ej: ETESA-688 o 230-4A")
             vista_r = st.radio("Vista:", ["✏️ Editar","👁 Vista previa Excel"],
@@ -1761,11 +1834,25 @@ def vista_premisas():
             st.caption(f"{len(df_rel_show)} relevantes")
 
             if vista_r == "✏️ Editar":
-                edited_r = st.data_editor(
-                    df_rel_show.reset_index(drop=True),
+                # Add selection column for vencidas
+                df_edit_rel = df_rel_show.reset_index(drop=True).copy()
+                df_edit_rel.insert(0, "🗑 Borrar", [
+                    str(df_rel_show.iloc[i].get("Libranza","")) in vencidas
+                    if i < len(df_rel_show) else False
+                    for i in range(len(df_edit_rel))])
+                edited_r_raw = st.data_editor(
+                    df_edit_rel,
                     use_container_width=True, hide_index=True,
-                    num_rows="dynamic", key="prem_editor_rel", height=450
+                    num_rows="dynamic", key="prem_editor_rel", height=450,
+                    column_config={
+                        "🗑 Borrar": st.column_config.CheckboxColumn("🗑", width="small"),
+                    }
                 )
+                # Update selection
+                if "🗑 Borrar" in edited_r_raw.columns and "Libranza" in edited_r_raw.columns:
+                    sel = set(edited_r_raw[edited_r_raw["🗑 Borrar"]==True]["Libranza"].astype(str))
+                    st.session_state["prem_rel_sel"] = sel
+                edited_r = edited_r_raw.drop(columns=["🗑 Borrar"], errors="ignore")
                 # Auto-save on change
                 full_rel = st.session_state.prem_df_relevantes.copy()
                 if buscar_r:
@@ -1787,13 +1874,17 @@ def vista_premisas():
                 for i in rel_idx:
                     try: statuses.append(df_rel["_status"].iloc[i] if "_status" in df_rel.columns else "")
                     except: statuses.append("")
-                def style_rel(row, _s=statuses):
+                def style_rel(row, _s=statuses, _v=vencidas):
                     idx = row.name
                     status = _s[idx] if idx < len(_s) else ""
                     tipo = str(row.get("Tipo","")).strip().lower() if "Tipo" in row.index else ""
+                    lib  = str(row.get("Libranza","")) if "Libranza" in row.index else ""
+                    is_vencida = lib in _v
                     styles = []
                     for col in row.index:
-                        if col == "Tipo":
+                        if is_vencida:
+                            styles.append("background-color:#FFCCCC;color:#CC0000;font-weight:bold")
+                        elif col == "Tipo":
                             if "continua" in tipo: styles.append("background-color:#C6EFCE")
                             elif "repetitiva" in tipo: styles.append("background-color:#FFB6C1")
                             else: styles.append("")
