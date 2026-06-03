@@ -142,6 +142,93 @@ SPECIAL_PLANTS = {
     'ESTI','ESTÍ','GATÚN','GATUN','GENERADORA GATUN','GATUN II'
 }
 
+
+# ── Auto-save / History helpers ──────────────────────────────────────────────
+def _df_hash(df):
+    """Fast hash of a DataFrame for change detection."""
+    try:
+        import pandas as pd
+        if df is None or (hasattr(df,'empty') and df.empty): return 0
+        return int(pd.util.hash_pandas_object(df, index=True).sum())
+    except: return hash(str(df))
+
+def _snapshot():
+    """Capture current editable state as a dict of copies."""
+    return {
+        "df_nuevas":      _safe_copy("prem_df_nuevas"),
+        "df_viejas":      _safe_copy("prem_df_viejas"),
+        "df_relevantes":  _safe_copy("prem_df_relevantes"),
+        "indisp_data":    _safe_copy("prem_indisp_data"),
+        "df_proyectos":   _safe_copy("prem_df_proyectos"),
+    }
+
+def _safe_copy(key):
+    v = st.session_state.get(key)
+    return v.copy() if v is not None and hasattr(v,'copy') else v
+
+def _push_history():
+    """Push current state onto undo stack (max 5)."""
+    hist = st.session_state.get("prem_history", [])
+    hist.append(_snapshot())
+    st.session_state.prem_history = hist[-5:]   # keep last 5
+
+def _auto_save(key, new_df):
+    """Compare new_df with stored df; if changed push history and update."""
+    if st.session_state.get("prem_autosave_lock", False): return
+    old_df = st.session_state.get(key)
+    if _df_hash(new_df) != _df_hash(old_df):
+        _push_history()
+        st.session_state[key] = new_df.copy()
+
+def _undo():
+    """Pop last snapshot and restore state."""
+    hist = st.session_state.get("prem_history", [])
+    if not hist: return
+    snap = hist.pop()
+    st.session_state.prem_history = hist
+    st.session_state.prem_autosave_lock = True   # prevent re-recording during restore
+    for k, v in [("prem_df_nuevas",     snap["df_nuevas"]),
+                 ("prem_df_viejas",      snap["df_viejas"]),
+                 ("prem_df_relevantes",  snap["df_relevantes"]),
+                 ("prem_indisp_data",    snap["indisp_data"]),
+                 ("prem_df_proyectos",   snap["df_proyectos"])]:
+        if v is not None: st.session_state[k] = v
+    st.session_state.prem_autosave_lock = False
+
+def _session_to_json():
+    """Serialize editable state to JSON string."""
+    import json
+    from datetime import datetime
+    def _df_to_j(key):
+        df = st.session_state.get(key)
+        return df.to_json(date_format='iso', force_ascii=False) if df is not None and not (hasattr(df,'empty') and df.empty) else None
+    return json.dumps({
+        "semana":        st.session_state.get("prem_current_week"),
+        "saved_at":      datetime.now().isoformat(timespec='seconds'),
+        "df_nuevas":     _df_to_j("prem_df_nuevas"),
+        "df_viejas":     _df_to_j("prem_df_viejas"),
+        "df_relevantes": _df_to_j("prem_df_relevantes"),
+        "indisp_data":   _df_to_j("prem_indisp_data"),
+        "df_proyectos":  _df_to_j("prem_df_proyectos"),
+    }, ensure_ascii=False, indent=2)
+
+def _load_session_from_json(json_bytes):
+    """Restore session state from JSON bytes."""
+    import json, pandas as pd
+    data = json.loads(json_bytes)
+    _push_history()
+    st.session_state.prem_autosave_lock = True
+    for key, skey in [("df_nuevas","prem_df_nuevas"), ("df_viejas","prem_df_viejas"),
+                      ("df_relevantes","prem_df_relevantes"), ("indisp_data","prem_indisp_data"),
+                      ("df_proyectos","prem_df_proyectos")]:
+        if data.get(key):
+            try: st.session_state[skey] = pd.read_json(data[key])
+            except: pass
+    if data.get("semana"):
+        st.session_state.prem_current_week = data["semana"]
+    st.session_state.prem_autosave_lock = False
+    return data.get("semana"), data.get("saved_at")
+
 @st.cache_data(show_spinner=False)
 def load_potencias_db(file_bytes):
     """Load potencias_unidades.xlsx → {unit_code_upper: potencia_mw}"""
@@ -1587,20 +1674,19 @@ def vista_premisas():
                         "Potencia (MW)": st.column_config.NumberColumn("Potencia (MW)", format="%.2f"),
                     }
                 )
-                if st.button("💾 Aplicar cambios", key="prem_apply_indisp"):
-                    full_id = st.session_state.prem_indisp_data.copy()
-                    if buscar_id:
-                        mask = full_id.apply(lambda r: buscar_id.lower() in
-                            " ".join(str(v) for v in r.values).lower(), axis=1)
-                        for col in ["Potencia (MW)","status"]:
-                            if col in edited_id.columns and len(edited_id) == mask.sum():
-                                full_id.loc[mask, col] = edited_id[col].values
-                    else:
-                        for col in ["Potencia (MW)","status"]:
-                            if col in edited_id.columns:
-                                full_id[col] = edited_id[col].values
-                    st.session_state.prem_indisp_data = full_id
-                    st.success("Cambios aplicados")
+                # Auto-save on change
+                full_id = st.session_state.prem_indisp_data.copy()
+                if buscar_id:
+                    mask = full_id.apply(lambda r: buscar_id.lower() in
+                        " ".join(str(v) for v in r.values).lower(), axis=1)
+                    for col in ["Potencia (MW)","status"]:
+                        if col in edited_id.columns and len(edited_id) == mask.sum():
+                            full_id.loc[mask, col] = edited_id[col].values
+                else:
+                    for col in ["Potencia (MW)","status"]:
+                        if col in edited_id.columns:
+                            full_id[col] = edited_id[col].values
+                _auto_save("prem_indisp_data", full_id)
             else:
                 # Vista previa agrupada por día (como el Excel)
                 week_dates = weeks.get(cw, [None]*7)
@@ -1680,20 +1766,19 @@ def vista_premisas():
                     use_container_width=True, hide_index=True,
                     num_rows="dynamic", key="prem_editor_rel", height=450
                 )
-                if st.button("💾 Aplicar cambios", key="prem_apply_rel"):
-                    full_rel = st.session_state.prem_df_relevantes.copy()
-                    if buscar_r:
-                        mask_full = full_rel[disp_r].apply(lambda row: buscar_r.lower() in
-                            " ".join(str(v) for v in row.values).lower(), axis=1)
-                        for col in disp_r:
-                            if col in edited_r.columns and len(edited_r) == mask_full.sum():
-                                full_rel.loc[mask_full, col] = edited_r[col].values
-                    else:
-                        for col in disp_r:
-                            if col in edited_r.columns:
-                                full_rel[col] = edited_r[col].values
-                    st.session_state.prem_df_relevantes = full_rel.reset_index(drop=True)
-                    st.success("Cambios aplicados")
+                # Auto-save on change
+                full_rel = st.session_state.prem_df_relevantes.copy()
+                if buscar_r:
+                    mask_full = full_rel[disp_r].apply(lambda row: buscar_r.lower() in
+                        " ".join(str(v) for v in row.values).lower(), axis=1)
+                    for col in disp_r:
+                        if col in edited_r.columns and len(edited_r) == mask_full.sum():
+                            full_rel.loc[mask_full, col] = edited_r[col].values
+                else:
+                    for col in disp_r:
+                        if col in edited_r.columns:
+                            full_rel[col] = edited_r[col].values
+                _auto_save("prem_df_relevantes", full_rel.reset_index(drop=True))
             else:
                 # Vista previa coloreada (como el Excel)
                 df_prev = df_rel_show.reset_index(drop=True)
