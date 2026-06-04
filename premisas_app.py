@@ -1595,6 +1595,7 @@ def vista_premisas():
         "⚠️ Indisponibilidades",
         "🔑 Relevantes",
         "🏭 Proyectos",
+        "🗑 Eliminadas",
     ])
 
     # ── TAB 0: Libranzas Nuevas ───────────────────────────────────────
@@ -1797,13 +1798,17 @@ def vista_premisas():
             n_venc = len([r for _,r in df_rel.iterrows()
                           if str(r.get("Libranza","")) in vencidas])
             if n_venc > 0:
-                st.warning(f"⚠️ **{n_venc} relevante(s) vencida(s)** (Cancelada/Ejecutada) — se muestran en rojo")
+                st.warning(f"⚠️ **{n_venc} relevante(s) vencida(s)** — ver pestaña 🗑 Eliminadas")
                 col_d1, col_d2 = st.columns(2)
                 if col_d1.button("🗑 Borrar seleccionadas", key="prem_del_sel",
                                   use_container_width=True):
                     sel = st.session_state.get("prem_rel_sel", set())
                     if sel:
                         _push_history()
+                        rows_to_del = df_rel[df_rel["Libranza"].isin(sel)]
+                        elim = list(st.session_state.get("prem_eliminadas", []))
+                        elim.extend(rows_to_del.to_dict('records'))
+                        st.session_state["prem_eliminadas"] = elim
                         st.session_state.prem_df_relevantes = df_rel[
                             ~df_rel["Libranza"].isin(sel)].reset_index(drop=True)
                         st.session_state["prem_vencidas"] = vencidas - sel
@@ -1812,12 +1817,28 @@ def vista_premisas():
                 if col_d2.button("🗑 Borrar todas vencidas", key="prem_del_all",
                                   use_container_width=True, type="primary"):
                     _push_history()
+                    rows_to_del = df_rel[df_rel["Libranza"].isin(vencidas)]
+                    elim = list(st.session_state.get("prem_eliminadas", []))
+                    elim.extend(rows_to_del.to_dict('records'))
+                    st.session_state["prem_eliminadas"] = elim
                     st.session_state.prem_df_relevantes = df_rel[
                         ~df_rel["Libranza"].isin(vencidas)].reset_index(drop=True)
                     st.session_state["prem_vencidas"] = set()
                     st.rerun()
             else:
                 st.info(f"**{len(df_rel)} relevantes**")
+
+            # Vencidas section (read-only, separate from main table)
+            if n_venc > 0:
+                with st.expander(f"👁 Ver {n_venc} libranza(s) vencida(s) — solo visualización"):
+                    disp_venc = [c for c in ["Tipo","Fecha inicio","Fecha final",
+                                             "Libranza","Descripción del trabajo","Estado"]
+                                 if c in df_rel.columns]
+                    df_venc_show = df_rel[df_rel["Libranza"].isin(vencidas)][disp_venc]
+                    st.dataframe(
+                        df_venc_show.reset_index(drop=True).style.apply(
+                            lambda _: ["background-color:#FFCCCC;color:#CC0000"]*len(disp_venc), axis=1),
+                        use_container_width=True, hide_index=True)
 
             buscar_r = st.text_input("🔍 Buscar", key="prem_search_rel",
                                      placeholder="Ej: ETESA-688 o 230-4A")
@@ -1834,25 +1855,11 @@ def vista_premisas():
             st.caption(f"{len(df_rel_show)} relevantes")
 
             if vista_r == "✏️ Editar":
-                # Add selection column for vencidas
-                df_edit_rel = df_rel_show.reset_index(drop=True).copy()
-                df_edit_rel.insert(0, "🗑 Borrar", [
-                    str(df_rel_show.iloc[i].get("Libranza","")) in vencidas
-                    if i < len(df_rel_show) else False
-                    for i in range(len(df_edit_rel))])
-                edited_r_raw = st.data_editor(
-                    df_edit_rel,
+                edited_r = st.data_editor(
+                    df_rel_show.reset_index(drop=True),
                     use_container_width=True, hide_index=True,
-                    num_rows="dynamic", key="prem_editor_rel", height=450,
-                    column_config={
-                        "🗑 Borrar": st.column_config.CheckboxColumn("🗑", width="small"),
-                    }
+                    num_rows="dynamic", key="prem_editor_rel", height=450
                 )
-                # Update selection
-                if "🗑 Borrar" in edited_r_raw.columns and "Libranza" in edited_r_raw.columns:
-                    sel = set(edited_r_raw[edited_r_raw["🗑 Borrar"]==True]["Libranza"].astype(str))
-                    st.session_state["prem_rel_sel"] = sel
-                edited_r = edited_r_raw.drop(columns=["🗑 Borrar"], errors="ignore")
                 # Auto-save on change
                 full_rel = st.session_state.prem_df_relevantes.copy()
                 if buscar_r:
@@ -1874,17 +1881,13 @@ def vista_premisas():
                 for i in rel_idx:
                     try: statuses.append(df_rel["_status"].iloc[i] if "_status" in df_rel.columns else "")
                     except: statuses.append("")
-                def style_rel(row, _s=statuses, _v=vencidas):
+                def style_rel(row, _s=statuses):
                     idx = row.name
                     status = _s[idx] if idx < len(_s) else ""
                     tipo = str(row.get("Tipo","")).strip().lower() if "Tipo" in row.index else ""
-                    lib  = str(row.get("Libranza","")) if "Libranza" in row.index else ""
-                    is_vencida = lib in _v
                     styles = []
                     for col in row.index:
-                        if is_vencida:
-                            styles.append("background-color:#FFCCCC;color:#CC0000;font-weight:bold")
-                        elif col == "Tipo":
+                        if col == "Tipo":
                             if "continua" in tipo: styles.append("background-color:#C6EFCE")
                             elif "repetitiva" in tipo: styles.append("background-color:#FFB6C1")
                             else: styles.append("")
