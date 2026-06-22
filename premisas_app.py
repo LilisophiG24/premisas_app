@@ -143,27 +143,97 @@ SPECIAL_PLANTS = {
 }
 
 
-def _actualizar_premisa(df_viejas_nuevas):
-    """Cross current relevantes against updated viejas to find vencidas."""
-    if st.session_state.get("prem_df_relevantes") is None: return 0
+def _actualizar_premisa(df_viejas_raw, df_nuevas_raw=None, indisp_file_df=None):
+    """Full update: detect vencidas, add new relevantes, update indisponibilidades."""
     ESTADOS_VENCIDOS = {"cancelada", "ejecutada"}
-    # Build dict: libranza_num → ultimo_estado from new viejas file
+
+    # ── 1. Detect vencidas from viejas ─────────────────────────
     estado_dict = {}
-    if df_viejas_nuevas is not None and not df_viejas_nuevas.empty:
-        for _, row in df_viejas_nuevas.iterrows():
-            num    = str(row.get("Número","")).strip()
-            estado = str(row.get("Último Estado","")).strip().lower()
-            if num: estado_dict[num] = estado
-    # Find vencidas in current relevantes
-    df_rel = st.session_state.prem_df_relevantes
+    if df_viejas_raw is not None and not df_viejas_raw.empty:
+        col_num    = next((c for c in df_viejas_raw.columns
+                          if "número" in c.lower() or "numero" in c.lower()), None)
+        col_estado = next((c for c in df_viejas_raw.columns
+                          if "estado" in c.lower()), None)
+        if col_num and col_estado:
+            for _, row in df_viejas_raw.iterrows():
+                num    = str(row.get(col_num,"")).strip()
+                estado = str(row.get(col_estado,"")).strip().lower()
+                if num: estado_dict[num] = estado
+
+    df_rel = st.session_state.get("prem_df_relevantes")
     vencidas = set()
-    for _, row in df_rel.iterrows():
-        lib = str(row.get("Libranza","")).strip()
-        if lib in estado_dict and estado_dict[lib] in ESTADOS_VENCIDOS:
-            vencidas.add(lib)
-    _push_history()
+    if df_rel is not None:
+        for _, row in df_rel.iterrows():
+            lib = str(row.get("Libranza","")).strip()
+            if lib in estado_dict and estado_dict[lib] in ESTADOS_VENCIDOS:
+                vencidas.add(lib)
     st.session_state["prem_vencidas"] = vencidas
-    return len(vencidas)
+
+    # ── 2. Add new relevantes from nuevas ──────────────────────
+    n_nuevas_rel = 0
+    if df_nuevas_raw is not None and not df_nuevas_raw.empty:
+        lc  = st.session_state.get("prem_lineas_codes", set())
+        um  = st.session_state.get("prem_unit_mw", {})
+        pp  = st.session_state.get("prem_plant_prefix", {})
+        edb = st.session_state.get("prem_equipos_db")
+        pdb = st.session_state.get("prem_potencias_db", {})
+        ll  = st.session_state.get("prem_lineas_lookup", {})
+        df_n_proc = process_nuevas(df_nuevas_raw, lc, um, pp, edb)
+        # Existing libranza numbers
+        existing = set()
+        if df_rel is not None:
+            existing = set(df_rel["Libranza"].astype(str))
+        # Build relevantes from nuevas
+        df_rel_new = build_relevantes(df_n_proc,
+                                      pd.DataFrame(),
+                                      ll,
+                                      relevantes_anteriores=None,
+                                      week_start=st.session_state.get("prem_week_start"))
+        # Keep only new ones not already in relevantes
+        if df_rel_new is not None and not df_rel_new.empty:
+            df_truly_new = df_rel_new[~df_rel_new["Libranza"].isin(existing)]
+            if not df_truly_new.empty:
+                n_nuevas_rel = len(df_truly_new)
+                _push_history()
+                combined = pd.concat([df_rel, df_truly_new], ignore_index=True) \
+                    if df_rel is not None and not df_rel.empty else df_truly_new
+                st.session_state.prem_df_relevantes = combined
+
+    # ── 3. Update indisponibilidades ───────────────────────────
+    n_nuevas_ind = 0
+    if df_nuevas_raw is not None or df_viejas_raw is not None:
+        lc  = st.session_state.get("prem_lineas_codes", set())
+        um  = st.session_state.get("prem_unit_mw", {})
+        pp  = st.session_state.get("prem_plant_prefix", {})
+        edb = st.session_state.get("prem_equipos_db")
+        pdb = st.session_state.get("prem_potencias_db", {})
+        weeks   = st.session_state.get("prem_weeks", {})
+        cw      = st.session_state.get("prem_current_week")
+        indisp_exist = []
+
+        df_v_proc = process_viejas(df_viejas_raw, lc, um, pp, edb) \
+            if df_viejas_raw is not None else pd.DataFrame()
+        df_n_proc2 = process_nuevas(df_nuevas_raw, lc, um, pp, edb) \
+            if df_nuevas_raw is not None else pd.DataFrame()
+
+        df_ind_new = build_indisponibilidades(
+            indisp_exist, df_v_proc, df_n_proc2,
+            um, pp, weeks, cw, indisp_file_df, pdb)
+
+        if df_ind_new is not None and not df_ind_new.empty:
+            existing_ind = set()
+            df_ind_cur = st.session_state.get("prem_indisp_data")
+            if df_ind_cur is not None and not df_ind_cur.empty:
+                existing_ind = set(df_ind_cur["Libranza"].astype(str))
+            df_ind_truly_new = df_ind_new[~df_ind_new["Libranza"].isin(existing_ind)]
+            if not df_ind_truly_new.empty:
+                n_nuevas_ind = len(df_ind_truly_new)
+                _push_history()
+                combined_ind = pd.concat([df_ind_cur, df_ind_truly_new], ignore_index=True) \
+                    if df_ind_cur is not None and not df_ind_cur.empty else df_ind_truly_new
+                st.session_state.prem_indisp_data = combined_ind
+
+    return len(vencidas), n_nuevas_rel, n_nuevas_ind
 
 
 # ── Auto-save / History helpers ──────────────────────────────────────────────
@@ -174,6 +244,15 @@ def _df_hash(df):
         if df is None or (hasattr(df,'empty') and df.empty): return 0
         return int(pd.util.hash_pandas_object(df, index=True).sum())
     except: return hash(str(df))
+
+def _safe_mw(v):
+    """Safely convert a potencia value to float, returning 0 for blanks/dashes."""
+    if v is None: return 0.0
+    s = str(v).strip()
+    if s in ("", "-", "--", "N/A", "n/a", "nan"): return 0.0
+    try: return float(s.replace(",", "."))
+    except: return 0.0
+
 
 def _snapshot():
     """Capture current editable state as a dict of copies."""
@@ -223,11 +302,13 @@ def _undo():
 
 def _session_to_json():
     """Serialize editable state to JSON string."""
-    import json
+    import json, pickle, base64
     from datetime import datetime
     def _df_to_j(key):
         df = st.session_state.get(key)
         return df.to_json(date_format='iso', force_ascii=False) if df is not None and not (hasattr(df,'empty') and df.empty) else None
+    def _set_to_list(v):
+        return list(v) if isinstance(v, set) else []
     return json.dumps({
         "semana":        st.session_state.get("prem_current_week"),
         "saved_at":      datetime.now().isoformat(timespec='seconds'),
@@ -236,6 +317,10 @@ def _session_to_json():
         "df_relevantes": _df_to_j("prem_df_relevantes"),
         "indisp_data":   _df_to_j("prem_indisp_data"),
         "df_proyectos":  _df_to_j("prem_df_proyectos"),
+        "lineas_codes":  _set_to_list(st.session_state.get("prem_lineas_codes") or []),
+        "unit_mw":       st.session_state.get("prem_unit_mw") or {},
+        "plant_prefix":  st.session_state.get("prem_plant_prefix") or {},
+        "weeks":         {str(k): [str(d) for d in v] for k,v in (st.session_state.get("prem_weeks") or {}).items()},
     }, ensure_ascii=False, indent=2)
 
 def _load_session_from_json(json_bytes):
@@ -252,6 +337,22 @@ def _load_session_from_json(json_bytes):
             except: pass
     if data.get("semana"):
         st.session_state.prem_current_week = data["semana"]
+    # Restore classification params
+    if data.get("lineas_codes"):
+        st.session_state.prem_lineas_codes = set(data["lineas_codes"])
+    if data.get("unit_mw"):
+        st.session_state.prem_unit_mw = data["unit_mw"]
+    if data.get("plant_prefix"):
+        st.session_state.prem_plant_prefix = data["plant_prefix"]
+    if data.get("weeks"):
+        import pandas as _pd
+        weeks_restored = {}
+        for k, v in data["weeks"].items():
+            try:
+                dates = [_pd.Timestamp(d) for d in v]
+                weeks_restored[int(k)] = dates
+            except: pass
+        st.session_state.prem_weeks = weeks_restored
     st.session_state.prem_autosave_lock = False
     return data.get("semana"), data.get("saved_at")
 
@@ -713,7 +814,7 @@ def parse_existing_indisp_flat(ws):
             "Fecha final":   str(row[3] or ""),
             "Hora final":    str(row[4] or ""),
             "Unidad":        str(row[5] or ""),
-            "Potencia (MW)": float(row[6] or 0),
+            "Potencia (MW)": _safe_mw(row[6]),
             "Libranza":      lib,
             "Descripción":   str(row[8] or ""),
         })
@@ -816,7 +917,7 @@ def load_indisp_file(file_bytes):
                 "Fecha final":   fmt_date(ff) if ff else "SIN FECHA",
                 "Hora final":    fmt_time(ff) if ff else "",
                 "Unidad":        str(b).strip(),
-                "Potencia (MW)": float(g or 0),
+                "Potencia (MW)": _safe_mw(g),
                 "Libranza":      str(e or "").strip(),
                 "Descripción":   str(d or "").strip(),
                 "status":        "vieja",
@@ -1452,26 +1553,37 @@ def vista_premisas():
         # equipos_libranzas.xlsx loaded automatically from repo
         st.divider()
         st.markdown("**🔄 Actualizar Premisa existente**")
-        st.caption("Usa sesión guardada + nuevas libranzas para detectar vencidas")
+        st.caption("Detecta relevantes vencidas (Cancelada/Ejecutada) con las libranzas viejas actualizadas")
+        
+        _tiene_rel = st.session_state.get("prem_df_relevantes") is not None
+        _tiene_v   = f_viejas is not None
+        
+        if not _tiene_rel:
+            st.caption("⚠️ Primero procesa o carga una sesión guardada")
+        if not _tiene_v:
+            st.caption("⚠️ Sube el archivo de libranzas viejas (campo 3)")
+
         btn_actualizar = st.button("🔄 Actualizar Premisa",
             use_container_width=True, key="prem_btn_actualizar",
-            disabled=(st.session_state.get("prem_df_relevantes") is None or not f_viejas))
+            disabled=(not _tiene_rel or not _tiene_v))
         if btn_actualizar and f_viejas:
-            with st.spinner("Cruzando relevantes con libranzas..."):
+            with st.spinner("Actualizando premisa..."):
                 try:
-                    _lc  = st.session_state.get("prem_lineas_codes", set())
-                    _um  = st.session_state.get("prem_unit_mw", {})
-                    _pp  = st.session_state.get("prem_plant_prefix", {})
-                    _edb = st.session_state.get("prem_equipos_db")
-                    df_v_new = process_viejas(load_source_libranzas(f_viejas.read()), _lc, _um, _pp, _edb)
-                    n = _actualizar_premisa(df_v_new)
-                    if n > 0:
-                        st.warning(f"⚠️ {n} relevante(s) vencida(s) — ve a la pestaña Relevantes")
-                    else:
-                        st.success("✅ Sin cambios — no hay vencidas")
+                    df_raw_v = load_source_libranzas(f_viejas.read())
+                    df_raw_n = load_source_libranzas(f_nuevas.read()) if f_nuevas else None
+                    indisp_f = load_indisp_file(f_indisp.read()) if f_indisp else None
+                    n_venc, n_rel, n_ind = _actualizar_premisa(df_raw_v, df_raw_n, indisp_f)
+                    msgs = []
+                    if n_venc > 0: msgs.append(f"⚠️ {n_venc} relevante(s) vencida(s)")
+                    if n_rel  > 0: msgs.append(f"✅ {n_rel} relevante(s) nueva(s) agregada(s)")
+                    if n_ind  > 0: msgs.append(f"✅ {n_ind} indisponibilidad(es) nueva(s) agregada(s)")
+                    if not msgs: msgs.append("✅ Sin cambios detectados")
+                    for msg in msgs:
+                        st.info(msg) if "✅" in msg else st.warning(msg)
                     st.rerun()
                 except Exception as e:
                     st.error(f"Error: {e}")
+                    import traceback; st.text(traceback.format_exc())
 
         st.divider()
         btn_process = st.button("⚙️ Procesar", type="primary", use_container_width=True,
